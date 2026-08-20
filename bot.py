@@ -4,14 +4,15 @@ import sys
 import time
 import html
 import hashlib
+import threading
 import requests
 from datetime import datetime
 from bs4 import BeautifulSoup
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
 # =====================================================================
-# Configuration (Reads from Environment Variables, .env, or Defaults)
+# Configuration (Reads from Environment Variables / GitHub Secrets)
 # =====================================================================
 PANEL_URL = os.getenv("PANEL_URL", "http://51.75.55.16/ints/login").rstrip("/")
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://51.75.55.16/ints/agent/SMSCDRReports")
@@ -22,12 +23,21 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 TG_TOKEN = os.getenv("TG_TOKEN", "").strip()
 TG_CHAT = os.getenv("TG_CHAT", "").strip()
 
+# Global State Metrics for Command Responses
+START_TIME = datetime.now()
+TOTAL_CAPTURED = 0
+WEBSITE_TOTAL = 0
+LAST_SCAN_TIME = "Starting..."
+
 # =====================================================================
 # Safe Logging Utility
 # =====================================================================
 def log(msg: str, level: str = "INFO"):
     t = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    clean = msg.encode(sys.stdout.encoding or 'utf-8', errors='replace').decode(sys.stdout.encoding or 'utf-8')
+    try:
+        clean = msg.encode(sys.stdout.encoding or 'utf-8', errors='replace').decode(sys.stdout.encoding or 'utf-8')
+    except Exception:
+        clean = msg
     print(f"[{t}] [{level}] {clean}", flush=True)
 
 # =====================================================================
@@ -45,23 +55,48 @@ class SMSMessage:
     has_dollar: bool = False
 
 # =====================================================================
-# Telegram Forwarder
+# Interactive Telegram Bot & Command Menu
 # =====================================================================
 class TelegramBot:
     def __init__(self, token: str, chat_id: str):
         self.token = token
         self.chat_id = chat_id
+        self.last_update_id = 0
+        self._listener_running = False
 
     def is_configured(self) -> bool:
         return bool(self.token and self.chat_id)
 
-    def send_text(self, text: str) -> bool:
+    def register_command_menu(self):
+        """Registers the / command menu in Telegram UI so users see the command popup."""
         if not self.is_configured():
+            return
+        try:
+            url = f"https://api.telegram.org/bot{self.token}/setMyCommands"
+            payload = {
+                "commands": [
+                    {"command": "status", "description": "📊 Live Bot Status & Metrics"},
+                    {"command": "ping", "description": "⚡ Check Bot Connection Latency"},
+                    {"command": "start", "description": "🚀 Welcome & Verification Check"},
+                    {"command": "help", "description": "❓ Help & Command List"}
+                ]
+            }
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code == 200:
+                log("Registered Telegram command menu successfully.", "INFO")
+        except Exception as e:
+            log(f"Failed to register command menu: {e}", "WARNING")
+
+    def send_text(self, text: str, target_chat: Optional[str] = None) -> bool:
+        if not self.token:
+            return False
+        chat_to_use = target_chat or self.chat_id
+        if not chat_to_use:
             return False
         try:
             url = f"https://api.telegram.org/bot{self.token}/sendMessage"
             payload = {
-                "chat_id": self.chat_id,
+                "chat_id": chat_to_use,
                 "text": text,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True
@@ -72,11 +107,28 @@ class TelegramBot:
             log(f"Telegram send error: {e}", "ERROR")
             return False
 
+    def send_startup_banner(self, web_total: int = 0):
+        """Sends a rich startup & restart banner to Telegram."""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        card = (
+            "🚀 <b>TARGET SMS PRO — BOT ACTIVE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "🟢 <b>Status:</b> Online & Monitoring\n"
+            f"👤 <b>Account:</b> <code>{html.escape(USERNAME)}</code>\n"
+            f"📊 <b>Website Total SMS:</b> <code>{web_total}</code>\n"
+            f"⏱️ <b>Refresh Rate:</b> <code>{POLL_INTERVAL}s</code>\n"
+            f"🕒 <b>Started At:</b> <code>{now_str}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "💬 <i>Listening for LIVE incoming OTPs in real-time...</i>\n"
+            "👉 <i>Type /status or /ping to test bot interaction.</i>"
+        )
+        return self.send_text(card)
+
     def send_otp_alert(self, msg: SMSMessage) -> bool:
         if not self.is_configured():
             return False
 
-        # Discard summary/payout noise
+        # Filter noise
         text_lower = (msg.full_text or "").lower()
         if any(w in text_lower for w in ["my payout", "client payout", "total sms", "payout"]):
             return False
@@ -104,6 +156,93 @@ class TelegramBot:
             f"<i>{safe_body}</i>\n"
         )
         return self.send_text(card)
+
+    def start_command_listener(self):
+        """Runs background thread to handle interactive commands (/status, /ping, /help, /start)."""
+        if self._listener_running or not self.token:
+            return
+        self._listener_running = True
+        t = threading.Thread(target=self._command_loop, daemon=True)
+        t.start()
+
+    def _command_loop(self):
+        while self._listener_running:
+            try:
+                url = f"https://api.telegram.org/bot{self.token}/getUpdates"
+                params = {"offset": self.last_update_id + 1, "timeout": 20}
+                r = requests.get(url, params=params, timeout=25)
+                if r.status_code == 200:
+                    data = r.json()
+                    for update in data.get("result", []):
+                        self.last_update_id = update["update_id"]
+                        msg = update.get("message", {})
+                        text = msg.get("text", "").strip()
+                        sender_chat = str(msg.get("chat", {}).get("id", ""))
+                        
+                        if text:
+                            self._handle_command(text, sender_chat)
+            except Exception:
+                time.sleep(3)
+
+    def _handle_command(self, cmd_text: str, chat_id: str):
+        cmd = cmd_text.lower().split("@")[0].strip()
+        uptime_sec = int((datetime.now() - START_TIME).total_seconds())
+        hrs, rem = divmod(uptime_sec, 3600)
+        mins, secs = divmod(rem, 60)
+        uptime_str = f"{hrs}h {mins}m {secs}s"
+
+        if cmd in ["/status", "/stat", "/info"]:
+            reply = (
+                "📊 <b>TARGET SMS — LIVE STATUS</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "🟢 <b>Status:</b> Active & Polling\n"
+                f"👤 <b>User:</b> <code>{html.escape(USERNAME)}</code>\n"
+                f"📈 <b>Total on Website:</b> <code>{WEBSITE_TOTAL}</code>\n"
+                f"📥 <b>Live Captured:</b> <code>{TOTAL_CAPTURED}</code>\n"
+                f"⏱️ <b>Uptime:</b> <code>{uptime_str}</code>\n"
+                f"🕒 <b>Last Check:</b> <code>{LAST_SCAN_TIME}</code>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "⚡ <i>All systems operational.</i>"
+            )
+            self.send_text(reply, chat_id)
+
+        elif cmd in ["/ping"]:
+            reply = (
+                "⚡ <b>PONG!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "🟢 Bot is connected and scanning.\n"
+                f"⏱️ <b>Uptime:</b> {uptime_str}\n"
+                f"🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}"
+            )
+            self.send_text(reply, chat_id)
+
+        elif cmd in ["/start"]:
+            reply = (
+                "👋 <b>Welcome to Target SMS Pro Bot!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "🟢 Connected to live monitoring.\n"
+                f"📊 <b>Website SMS Total:</b> <code>{WEBSITE_TOTAL}</code>\n"
+                f"📥 <b>Captured:</b> <code>{TOTAL_CAPTURED}</code>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Commands:\n"
+                "• /status — View live metrics\n"
+                "• /ping — Check connection\n"
+                "• /help — Command manual"
+            )
+            self.send_text(reply, chat_id)
+
+        elif cmd in ["/help"]:
+            reply = (
+                "❓ <b>TARGET SMS BOT HELP</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "• <b>/status</b> — Check live website count & captured SMS\n"
+                "• <b>/ping</b> — Verify bot latency and uptime\n"
+                "• <b>/start</b> — Bot connection test\n"
+                "• <b>/help</b> — Show this help message\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "<i>New OTPs are delivered automatically as they arrive.</i>"
+            )
+            self.send_text(reply, chat_id)
 
 # =====================================================================
 # Intelligent SMS & OTP Parser
@@ -157,7 +296,6 @@ class SMSParser:
 
     @classmethod
     def extract_country_name(cls, range_text: str) -> str:
-        """Extracts only the country name (e.g. 'Kenya TEW Orange TG01' -> 'Kenya')."""
         if not range_text:
             return ""
         range_clean = range_text.strip()
@@ -170,7 +308,6 @@ class SMSParser:
 
     @classmethod
     def extract_total_sms(cls, html_content: str) -> int:
-        """Extracts the exact number from the 'Total SMS' box on the website."""
         if not html_content:
             return 0
         try:
@@ -197,7 +334,6 @@ class SMSParser:
 
     @classmethod
     def extract_otp(cls, text: str) -> str:
-        """Extracts 4-8 digit OTP / verification code."""
         if not text:
             return ""
         text = text.strip()
@@ -436,9 +572,11 @@ class TargetSession:
             return None
 
 # =====================================================================
-# Main Execution
+# Main Execution Loop
 # =====================================================================
 def main():
+    global TOTAL_CAPTURED, WEBSITE_TOTAL, LAST_SCAN_TIME
+
     log("==================================================", "INFO")
     log("⚡ TARGET SMS — STANDALONE CLOUD BOT", "INFO")
     log("==================================================", "INFO")
@@ -449,8 +587,9 @@ def main():
 
     tg = TelegramBot(TG_TOKEN, TG_CHAT)
     if tg.is_configured():
-        log("Telegram alerts enabled. Sending startup ping...", "INFO")
-        tg.send_text("🚀 <b>Target SMS Cloud Bot Started!</b>\nListening for live incoming OTPs...")
+        tg.register_command_menu()
+        tg.start_command_listener()
+        log("Telegram alerts & command listener enabled.", "INFO")
     else:
         log("Telegram alerts disabled (TG_TOKEN or TG_CHAT empty).", "WARNING")
 
@@ -470,17 +609,22 @@ def main():
                     continue
 
             html = session.fetch_dashboard()
+            LAST_SCAN_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
             if html:
                 total_sms_on_web = SMSParser.extract_total_sms(html)
                 messages = SMSParser.parse_html(html)
                 
                 if total_sms_on_web == 0:
                     total_sms_on_web = len(messages)
+                WEBSITE_TOTAL = total_sms_on_web
 
                 if is_first_sync:
                     for msg in messages:
                         known_ids.add(msg.id)
                     log(f"Synced baseline (Total SMS on website: {total_sms_on_web}). Listening for LIVE incoming OTPs...", "SUCCESS")
+                    if tg.is_configured():
+                        tg.send_startup_banner(web_total=total_sms_on_web)
                     is_first_sync = False
                 else:
                     new_count = 0
@@ -488,6 +632,7 @@ def main():
                         if msg.id not in known_ids:
                             known_ids.add(msg.id)
                             new_count += 1
+                            TOTAL_CAPTURED += 1
                             
                             dollar_str = " | 💵 $" if msg.has_dollar else ""
                             log(f"🔔 LIVE OTP! [{msg.service}] Code: {msg.otp_code} | Phone: {msg.phone_number} | Country: {msg.carrier_range}{dollar_str}", "SUCCESS")

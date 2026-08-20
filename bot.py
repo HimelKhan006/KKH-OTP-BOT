@@ -7,7 +7,7 @@ import json
 import hashlib
 import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
@@ -28,11 +28,11 @@ PANEL_URL = os.getenv("PANEL_URL", LOCAL_CFG.get("panel_url", "http://51.75.55.1
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", LOCAL_CFG.get("dashboard_url", "http://51.75.55.16/ints/agent/SMSCDRReports"))
 USERNAME = os.getenv("PANEL_USERNAME", LOCAL_CFG.get("username", "Kkh8868himel")).strip()
 PASSWORD = os.getenv("PANEL_PASSWORD", LOCAL_CFG.get("password", "KkhHimel8080Target "))
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", str(LOCAL_CFG.get("poll_interval", 5))))
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", str(LOCAL_CFG.get("poll_interval", 3))))
 
 # Telegram Configuration
-TG_TOKEN = os.getenv("TG_TOKEN", LOCAL_CFG.get("telegram_bot_token", "")).strip()
-TG_CHAT = os.getenv("TG_CHAT", LOCAL_CFG.get("telegram_chat_id", "")).strip()
+TG_TOKEN = os.getenv("TG_TOKEN", LOCAL_CFG.get("telegram_bot_token", "8999866920:AAFigVvjviEZA8KU5RjkTqnE6dEyq5w1Nw8")).strip()
+TG_CHAT = os.getenv("TG_CHAT", LOCAL_CFG.get("telegram_chat_id", "6798979733")).strip()
 ADMIN_ID = os.getenv("ADMIN_ID", LOCAL_CFG.get("admin_id", TG_CHAT)).strip()
 
 # =====================================================================
@@ -61,7 +61,7 @@ class SMSMessage:
     has_dollar: bool = False
 
 # =====================================================================
-# Professional Telegram Bot (Clean /start Only & OTP Forwarder)
+# Professional Telegram Bot (Clean /start Only & Instant OTP Forwarder)
 # =====================================================================
 class TelegramBot:
     def __init__(self, token: str, chat_id: str, admin_id: str = ""):
@@ -101,7 +101,11 @@ class TelegramBot:
                 "disable_web_page_preview": True
             }
             resp = requests.post(url, json=payload, timeout=10)
-            return resp.status_code == 200
+            if resp.status_code == 200:
+                return True
+            else:
+                log(f"Telegram API response: {resp.status_code} - {resp.text}", "WARNING")
+                return False
         except Exception as e:
             log(f"Telegram error sending to {target_chat}: {e}", "ERROR")
             return False
@@ -113,13 +117,12 @@ class TelegramBot:
             "━━━━━━━━━━━━━━━━━━━━━\n"
             "🟢 <b>Status:</b> Connected & Active\n"
             "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
+            "⏱️ <b>Speed:</b> Instant (every 3s)\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
-            "💬 <i>Ready to receive live incoming OTPs...</i>"
+            "💬 <i>Listening for live incoming OTPs in real-time...</i>"
         )
-        # Send to main chat/group
         if self.chat_id:
             self.send_text(msg, self.chat_id)
-        # If admin is different, also notify admin
         if self.admin_id and str(self.admin_id) != str(self.chat_id):
             self.send_text(msg, self.admin_id)
 
@@ -156,7 +159,10 @@ class TelegramBot:
             f"💬 <b>Message:</b>\n"
             f"<i>{safe_body}</i>\n"
         )
-        return self.send_text(card, target)
+        success = self.send_text(card, target)
+        if success:
+            log(f"✅ Alert sent to Telegram [{target}]: OTP {msg.otp_code} ({msg.service})", "SUCCESS")
+        return success
 
     def start_command_listener(self):
         """Listens ONLY for /start command to send simple confirmation."""
@@ -219,7 +225,7 @@ class SMSParser:
     ]
 
     COUNTRIES_LIST = [
-        "United States", "United Kingdom", "Saudi Arabia", "South Africa", "South Korea", 
+        "Palestine", "United States", "United Kingdom", "Saudi Arabia", "South Africa", "South Korea", 
         "New Zealand", "Czech Republic", "Dominican Republic", "Sri Lanka", "Costa Rica",
         "Puerto Rico", "El Salvador", "Hong Kong", "Ivory Coast", "Papua New Guinea",
         "Afghanistan", "Albania", "Algeria", "Argentina", "Armenia", "Australia", "Austria",
@@ -294,7 +300,7 @@ class SMSParser:
         if m:
             return f"{m.group(1)}{m.group(2)}"
 
-        # 2. "code is 910527" / "code 4108"
+        # 2. "code is 910527" / "code 4108" / "code: 123456"
         m = re.search(r'(?:security code|verification code|verification|code|otp|pin|passcode|is)\s*(?:is|:|=|-)?\s*(\b\d{4,8}\b)', text, re.IGNORECASE)
         if m:
             return m.group(1)
@@ -531,14 +537,14 @@ def main():
     log("==================================================", "INFO")
 
     if not USERNAME or not PASSWORD:
-        log("ERROR: Both USERNAME and PASSWORD are required!", "ERROR")
+        log("ERROR: Both USERNAME and PASSWORD are required in config.json or environment variables!", "ERROR")
         sys.exit(1)
 
     tg = TelegramBot(TG_TOKEN, TG_CHAT, ADMIN_ID)
     if tg.is_configured():
         tg.register_command_menu()
         tg.start_command_listener()
-        log("Telegram alert system active.", "INFO")
+        log(f"Telegram alert system active (Destination: {TG_CHAT}).", "INFO")
     else:
         log("Telegram alerts disabled (TG_TOKEN or TG_CHAT empty).", "WARNING")
 

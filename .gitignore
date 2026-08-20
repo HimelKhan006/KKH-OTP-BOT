@@ -1,5 +1,7 @@
 README.md
+SETUP_COMMANDS.md
 .env.example
 .env
 __pycache__/
 *.pyc
+*.bat

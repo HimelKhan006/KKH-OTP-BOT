@@ -3,6 +3,7 @@ import re
 import sys
 import time
 import html
+import json
 import hashlib
 import threading
 import requests
@@ -12,22 +13,55 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
 # =====================================================================
-# Configuration (Reads from Environment Variables / GitHub Secrets)
+# Configuration State (Dynamic & Admin Manageable)
 # =====================================================================
-PANEL_URL = os.getenv("PANEL_URL", "http://51.75.55.16/ints/login").rstrip("/")
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://51.75.55.16/ints/agent/SMSCDRReports")
-USERNAME = os.getenv("PANEL_USERNAME", "").strip()
-PASSWORD = os.getenv("PANEL_PASSWORD", "")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+LOCAL_CFG = {}
+if os.path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            LOCAL_CFG = json.load(f)
+    except Exception:
+        pass
 
-TG_TOKEN = os.getenv("TG_TOKEN", "").strip()
-TG_CHAT = os.getenv("TG_CHAT", "").strip()
+PANEL_URL = os.getenv("PANEL_URL", LOCAL_CFG.get("panel_url", "http://51.75.55.16/ints/login")).rstrip("/")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", LOCAL_CFG.get("dashboard_url", "http://51.75.55.16/ints/agent/SMSCDRReports"))
+USERNAME = os.getenv("PANEL_USERNAME", LOCAL_CFG.get("username", "Kkh8868himel")).strip()
+PASSWORD = os.getenv("PANEL_PASSWORD", LOCAL_CFG.get("password", "KkhHimel8080Target "))
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", str(LOCAL_CFG.get("poll_interval", 5))))
+
+TG_TOKEN = os.getenv("TG_TOKEN", LOCAL_CFG.get("telegram_bot_token", "")).strip()
+TG_CHAT = os.getenv("TG_CHAT", LOCAL_CFG.get("telegram_chat_id", "")).strip()
+
+# Admin Authorization ID (Defaults to TG_CHAT if ADMIN_ID not explicitly set)
+ADMIN_ID = os.getenv("ADMIN_ID", LOCAL_CFG.get("admin_id", TG_CHAT)).strip()
+
+def save_current_config():
+    """Persists updated configuration to config.json if writable."""
+    global LOCAL_CFG, PANEL_URL, DASHBOARD_URL, USERNAME, PASSWORD, POLL_INTERVAL, TG_TOKEN, TG_CHAT, ADMIN_ID
+    LOCAL_CFG.update({
+        "panel_url": PANEL_URL,
+        "dashboard_url": DASHBOARD_URL,
+        "username": USERNAME,
+        "password": PASSWORD,
+        "poll_interval": POLL_INTERVAL,
+        "telegram_bot_token": TG_TOKEN,
+        "telegram_chat_id": TG_CHAT,
+        "admin_id": ADMIN_ID
+    })
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(LOCAL_CFG, f, indent=4)
+        log("Config file updated successfully.", "SUCCESS")
+    except Exception as e:
+        log(f"Notice: Config running in memory (Read-only environment): {e}", "WARNING")
 
 # Global State Metrics for Command Responses
 START_TIME = datetime.now()
 TOTAL_CAPTURED = 0
 WEBSITE_TOTAL = 0
 LAST_SCAN_TIME = "Starting..."
+SESSION_INSTANCE = None
 
 # =====================================================================
 # Safe Logging Utility
@@ -55,7 +89,7 @@ class SMSMessage:
     has_dollar: bool = False
 
 # =====================================================================
-# Interactive Telegram Bot & Command Menu
+# Interactive Admin Telegram Bot & Management Panel
 # =====================================================================
 class TelegramBot:
     def __init__(self, token: str, chat_id: str):
@@ -68,24 +102,39 @@ class TelegramBot:
         return bool(self.token and self.chat_id)
 
     def register_command_menu(self):
-        """Registers the / command menu in Telegram UI so users see the command popup."""
-        if not self.is_configured():
+        """Registers administrative command menu in Telegram UI."""
+        if not self.token:
             return
         try:
             url = f"https://api.telegram.org/bot{self.token}/setMyCommands"
             payload = {
                 "commands": [
-                    {"command": "status", "description": "📊 Live Bot Status & Metrics"},
-                    {"command": "ping", "description": "⚡ Check Bot Connection Latency"},
-                    {"command": "start", "description": "🚀 Welcome & Verification Check"},
-                    {"command": "help", "description": "❓ Help & Command List"}
+                    {"command": "status", "description": "📊 Live Monitoring Status"},
+                    {"command": "config", "description": "⚙️ View Active Configuration"},
+                    {"command": "setuser", "description": "👤 Change Panel Username"},
+                    {"command": "setpass", "description": "🔑 Change Panel Password"},
+                    {"command": "setchat", "description": "💬 Change Alert Chat/Group ID"},
+                    {"command": "setinterval", "description": "⏱️ Change Polling Rate (sec)"},
+                    {"command": "relogin", "description": "🔄 Force Re-Authentication"},
+                    {"command": "ping", "description": "⚡ Test Bot Connection"},
+                    {"command": "help", "description": "❓ Admin Manual & Commands"}
                 ]
             }
             resp = requests.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
-                log("Registered Telegram command menu successfully.", "INFO")
+                log("Registered Admin Telegram command menu successfully.", "INFO")
         except Exception as e:
             log(f"Failed to register command menu: {e}", "WARNING")
+
+    def is_admin(self, user_id: str, chat_id: str) -> bool:
+        """Verifies if the message sender is the authorized Admin."""
+        allowed = {str(ADMIN_ID).strip(), str(self.chat_id).strip()}
+        # Remove empty strings
+        allowed.discard("")
+        if not allowed:
+            # If no admin configured, first sender becomes authorized admin
+            return True
+        return str(user_id).strip() in allowed or str(chat_id).strip() in allowed
 
     def send_text(self, text: str, target_chat: Optional[str] = None) -> bool:
         if not self.token:
@@ -108,7 +157,6 @@ class TelegramBot:
             return False
 
     def send_startup_banner(self, web_total: int = 0):
-        """Sends a rich startup & restart banner to Telegram."""
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         card = (
             "🚀 <b>TARGET SMS PRO — BOT ACTIVE</b>\n"
@@ -120,7 +168,7 @@ class TelegramBot:
             f"🕒 <b>Started At:</b> <code>{now_str}</code>\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
             "💬 <i>Listening for LIVE incoming OTPs in real-time...</i>\n"
-            "👉 <i>Type /status or /ping to test bot interaction.</i>"
+            "👑 <i>Admin Command Panel Active. Type /help to manage.</i>"
         )
         return self.send_text(card)
 
@@ -128,7 +176,6 @@ class TelegramBot:
         if not self.is_configured():
             return False
 
-        # Filter noise
         text_lower = (msg.full_text or "").lower()
         if any(w in text_lower for w in ["my payout", "client payout", "total sms", "payout"]):
             return False
@@ -158,7 +205,6 @@ class TelegramBot:
         return self.send_text(card)
 
     def start_command_listener(self):
-        """Runs background thread to handle interactive commands (/status, /ping, /help, /start)."""
         if self._listener_running or not self.token:
             return
         self._listener_running = True
@@ -177,27 +223,46 @@ class TelegramBot:
                         self.last_update_id = update["update_id"]
                         msg = update.get("message", {})
                         text = msg.get("text", "").strip()
+                        sender_id = str(msg.get("from", {}).get("id", ""))
                         sender_chat = str(msg.get("chat", {}).get("id", ""))
                         
                         if text:
-                            self._handle_command(text, sender_chat)
+                            self._handle_command(text, sender_id, sender_chat)
             except Exception:
                 time.sleep(3)
 
-    def _handle_command(self, cmd_text: str, chat_id: str):
-        cmd = cmd_text.lower().split("@")[0].strip()
+    def _handle_command(self, full_text: str, user_id: str, chat_id: str):
+        global USERNAME, PASSWORD, TG_CHAT, POLL_INTERVAL, SESSION_INSTANCE, ADMIN_ID
+
+        parts = full_text.strip().split(maxsplit=1)
+        raw_cmd = parts[0].lower().split("@")[0]
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        # Security Check: Reject Non-Admins
+        if not self.is_admin(user_id, chat_id):
+            deny_msg = (
+                "⛔ <b>Access Denied</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "You are not authorized to use or manage this bot.\n"
+                f"<i>Your ID: <code>{user_id}</code></i>"
+            )
+            self.send_text(deny_msg, chat_id)
+            log(f"Unauthorized command attempt from user_id: {user_id} in chat: {chat_id}", "WARNING")
+            return
+
         uptime_sec = int((datetime.now() - START_TIME).total_seconds())
         hrs, rem = divmod(uptime_sec, 3600)
         mins, secs = divmod(rem, 60)
         uptime_str = f"{hrs}h {mins}m {secs}s"
 
-        if cmd in ["/status", "/stat", "/info"]:
+        # 1. /status
+        if raw_cmd in ["/status", "/stat"]:
             reply = (
                 "📊 <b>TARGET SMS — LIVE STATUS</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
-                "🟢 <b>Status:</b> Active & Polling\n"
-                f"👤 <b>User:</b> <code>{html.escape(USERNAME)}</code>\n"
-                f"📈 <b>Total on Website:</b> <code>{WEBSITE_TOTAL}</code>\n"
+                "🟢 <b>Status:</b> Active & Monitoring\n"
+                f"👤 <b>Account:</b> <code>{html.escape(USERNAME)}</code>\n"
+                f"📈 <b>Website Total SMS:</b> <code>{WEBSITE_TOTAL}</code>\n"
                 f"📥 <b>Live Captured:</b> <code>{TOTAL_CAPTURED}</code>\n"
                 f"⏱️ <b>Uptime:</b> <code>{uptime_str}</code>\n"
                 f"🕒 <b>Last Check:</b> <code>{LAST_SCAN_TIME}</code>\n"
@@ -206,7 +271,91 @@ class TelegramBot:
             )
             self.send_text(reply, chat_id)
 
-        elif cmd in ["/ping"]:
+        # 2. /config or /settings
+        elif raw_cmd in ["/config", "/settings"]:
+            masked_pwd = (PASSWORD[:2] + "•" * max(4, len(PASSWORD) - 4) + PASSWORD[-2:]) if len(PASSWORD) > 4 else "••••"
+            reply = (
+                "⚙️ <b>ACTIVE BOT CONFIGURATION</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🌐 <b>Login URL:</b> <code>{html.escape(PANEL_URL)}</code>\n"
+                f"📊 <b>Reports URL:</b> <code>{html.escape(DASHBOARD_URL)}</code>\n"
+                f"👤 <b>Username:</b> <code>{html.escape(USERNAME)}</code>\n"
+                f"🔑 <b>Password:</b> <code>{html.escape(masked_pwd)}</code>\n"
+                f"💬 <b>Alert Chat ID:</b> <code>{html.escape(str(self.chat_id))}</code>\n"
+                f"👑 <b>Admin ID:</b> <code>{html.escape(str(ADMIN_ID))}</code>\n"
+                f"⏱️ <b>Poll Interval:</b> <code>{POLL_INTERVAL}s</code>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "Commands to modify:\n"
+                "• <code>/setuser &lt;username&gt;</code>\n"
+                "• <code>/setpass &lt;password&gt;</code>\n"
+                "• <code>/setchat &lt;chat_id&gt;</code>\n"
+                "• <code>/setinterval &lt;seconds&gt;</code>"
+            )
+            self.send_text(reply, chat_id)
+
+        # 3. /setuser <username>
+        elif raw_cmd == "/setuser":
+            if not arg:
+                self.send_text("⚠️ <b>Usage:</b> <code>/setuser &lt;new_username&gt;</code>", chat_id)
+                return
+            old_user = USERNAME
+            USERNAME = arg
+            save_current_config()
+            if SESSION_INSTANCE:
+                SESSION_INSTANCE.username = USERNAME
+                SESSION_INSTANCE.is_logged_in = False
+            self.send_text(f"✅ <b>Username Updated!</b>\nOld: <code>{html.escape(old_user)}</code>\nNew: <code>{html.escape(USERNAME)}</code>\n\n<i>Re-authenticating...</i>", chat_id)
+            log(f"Admin changed username to '{USERNAME}'", "SUCCESS")
+
+        # 4. /setpass <password>
+        elif raw_cmd == "/setpass":
+            if not arg:
+                self.send_text("⚠️ <b>Usage:</b> <code>/setpass &lt;new_password&gt;</code>", chat_id)
+                return
+            PASSWORD = arg
+            save_current_config()
+            if SESSION_INSTANCE:
+                SESSION_INSTANCE.password = PASSWORD
+                SESSION_INSTANCE.is_logged_in = False
+            self.send_text("✅ <b>Password Updated!</b>\nNew password has been saved securely.\n\n<i>Re-authenticating with website...</i>", chat_id)
+            log("Admin updated panel password via Telegram.", "SUCCESS")
+
+        # 5. /setchat <chat_id>
+        elif raw_cmd == "/setchat":
+            if not arg:
+                self.send_text("⚠️ <b>Usage:</b> <code>/setchat &lt;new_chat_or_group_id&gt;</code>", chat_id)
+                return
+            old_chat = self.chat_id
+            self.chat_id = arg
+            TG_CHAT = arg
+            save_current_config()
+            self.send_text(f"✅ <b>Alert Destination Updated!</b>\nOld: <code>{old_chat}</code>\nNew: <code>{self.chat_id}</code>\n\n<i>All live OTPs will now be sent here.</i>", chat_id)
+            if str(old_chat) != str(self.chat_id):
+                self.send_text(f"🔔 <b>Target SMS Bot Connected to this Chat!</b>\nAll incoming live OTP alerts will be delivered here.", self.chat_id)
+            log(f"Admin changed alert destination chat ID to {self.chat_id}", "SUCCESS")
+
+        # 6. /setinterval <seconds>
+        elif raw_cmd == "/setinterval":
+            if not arg or not arg.isdigit():
+                self.send_text("⚠️ <b>Usage:</b> <code>/setinterval &lt;seconds&gt;</code> (e.g. <code>/setinterval 3</code>)", chat_id)
+                return
+            POLL_INTERVAL = max(2, int(arg))
+            save_current_config()
+            self.send_text(f"✅ <b>Polling Interval Updated!</b>\nBot will now scan website every <code>{POLL_INTERVAL}</code> seconds.", chat_id)
+            log(f"Admin updated polling interval to {POLL_INTERVAL}s", "SUCCESS")
+
+        # 7. /relogin
+        elif raw_cmd in ["/relogin", "/restart"]:
+            self.send_text("🔄 <b>Re-Authenticating...</b>\nSolving math captcha and establishing fresh session...", chat_id)
+            if SESSION_INSTANCE:
+                SESSION_INSTANCE.is_logged_in = False
+                if SESSION_INSTANCE.login():
+                    self.send_text("✅ <b>Re-Authentication Successful!</b>\nBot is actively monitoring.", chat_id)
+                else:
+                    self.send_text("❌ <b>Re-Authentication Failed!</b>\nCheck /config username and password.", chat_id)
+
+        # 8. /ping
+        elif raw_cmd in ["/ping"]:
             reply = (
                 "⚡ <b>PONG!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
@@ -216,31 +365,45 @@ class TelegramBot:
             )
             self.send_text(reply, chat_id)
 
-        elif cmd in ["/start"]:
+        # 9. /start
+        elif raw_cmd in ["/start"]:
             reply = (
-                "👋 <b>Welcome to Target SMS Pro Bot!</b>\n"
+                "👑 <b>TARGET SMS PRO — ADMIN PANEL</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
-                "🟢 Connected to live monitoring.\n"
+                "🟢 <b>Status:</b> Online & Monitoring\n"
+                f"👤 <b>Account:</b> <code>{html.escape(USERNAME)}</code>\n"
                 f"📊 <b>Website SMS Total:</b> <code>{WEBSITE_TOTAL}</code>\n"
-                f"📥 <b>Captured:</b> <code>{TOTAL_CAPTURED}</code>\n"
+                f"📥 <b>Live Captured:</b> <code>{TOTAL_CAPTURED}</code>\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
-                "Commands:\n"
+                "🛠️ <b>Admin Commands:</b>\n"
                 "• /status — View live metrics\n"
-                "• /ping — Check connection\n"
-                "• /help — Command manual"
+                "• /config — View active credentials & URLs\n"
+                "• <code>/setuser &lt;username&gt;</code> — Update username\n"
+                "• <code>/setpass &lt;password&gt;</code> — Update password\n"
+                "• <code>/setchat &lt;chat_id&gt;</code> — Change destination\n"
+                "• <code>/setinterval &lt;sec&gt;</code> — Change refresh rate\n"
+                "• /relogin — Force re-login\n"
+                "• /help — Full command manual"
             )
             self.send_text(reply, chat_id)
 
-        elif cmd in ["/help"]:
+        # 10. /help
+        elif raw_cmd in ["/help"]:
             reply = (
-                "❓ <b>TARGET SMS BOT HELP</b>\n"
+                "📖 <b>TARGET SMS BOT ADMIN MANUAL</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
-                "• <b>/status</b> — Check live website count & captured SMS\n"
-                "• <b>/ping</b> — Verify bot latency and uptime\n"
-                "• <b>/start</b> — Bot connection test\n"
-                "• <b>/help</b> — Show this help message\n"
+                "<b>📊 Monitoring Commands:</b>\n"
+                "• <b>/status</b> — Check website total & live captured count\n"
+                "• <b>/ping</b> — Test bot connection and uptime\n"
+                "• <b>/relogin</b> — Force fresh login & math captcha solver\n\n"
+                "<b>⚙️ Management Commands:</b>\n"
+                "• <b>/config</b> — View current URLs, user, chat ID & interval\n"
+                "• <b>/setuser &lt;name&gt;</b> — Change website username\n"
+                "• <b>/setpass &lt;pass&gt;</b> — Change website password\n"
+                "• <b>/setchat &lt;id&gt;</b> — Redirect alerts to personal or group ID\n"
+                "• <b>/setinterval &lt;sec&gt;</b> — Set scan refresh rate (2-60s)\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
-                "<i>New OTPs are delivered automatically as they arrive.</i>"
+                "<i>Only authorized admins can use these commands.</i>"
             )
             self.send_text(reply, chat_id)
 
@@ -575,10 +738,10 @@ class TargetSession:
 # Main Execution Loop
 # =====================================================================
 def main():
-    global TOTAL_CAPTURED, WEBSITE_TOTAL, LAST_SCAN_TIME
+    global TOTAL_CAPTURED, WEBSITE_TOTAL, LAST_SCAN_TIME, SESSION_INSTANCE
 
     log("==================================================", "INFO")
-    log("⚡ TARGET SMS — STANDALONE CLOUD BOT", "INFO")
+    log("⚡ TARGET SMS — ADMIN MANAGED CLOUD BOT", "INFO")
     log("==================================================", "INFO")
 
     if not USERNAME or not PASSWORD:
@@ -589,12 +752,12 @@ def main():
     if tg.is_configured():
         tg.register_command_menu()
         tg.start_command_listener()
-        log("Telegram alerts & command listener enabled.", "INFO")
+        log("Telegram alerts & Admin command listener enabled.", "INFO")
     else:
         log("Telegram alerts disabled (TG_TOKEN or TG_CHAT empty).", "WARNING")
 
-    session = TargetSession(PANEL_URL, USERNAME, PASSWORD)
-    if not session.login():
+    SESSION_INSTANCE = TargetSession(PANEL_URL, USERNAME, PASSWORD)
+    if not SESSION_INSTANCE.login():
         log("Initial login attempt failed. Will retry in main loop...", "WARNING")
 
     known_ids = set()
@@ -603,12 +766,12 @@ def main():
 
     while True:
         try:
-            if not session.is_logged_in:
-                if not session.login():
+            if not SESSION_INSTANCE.is_logged_in:
+                if not SESSION_INSTANCE.login():
                     time.sleep(POLL_INTERVAL)
                     continue
 
-            html = session.fetch_dashboard()
+            html = SESSION_INSTANCE.fetch_dashboard()
             LAST_SCAN_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             if html:

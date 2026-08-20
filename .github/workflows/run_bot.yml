@@ -1,0 +1,38 @@
+name: Run Target SMS Cloud Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+jobs:
+  run-sms-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Standalone Bot
+        env:
+          PANEL_URL: ${{ secrets.PANEL_URL || 'http://51.75.55.16/ints/login' }}
+          DASHBOARD_URL: ${{ secrets.DASHBOARD_URL || 'http://51.75.55.16/ints/agent/SMSCDRReports' }}
+          PANEL_USERNAME: ${{ secrets.PANEL_USERNAME || 'Kkh8868himel' }}
+          PANEL_PASSWORD: ${{ secrets.PANEL_PASSWORD }}
+          POLL_INTERVAL: ${{ secrets.POLL_INTERVAL || '5' }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+        run: |
+          python bot.py

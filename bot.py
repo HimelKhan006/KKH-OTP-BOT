@@ -16,11 +16,11 @@ from dataclasses import dataclass
 PANEL_URL = os.getenv("PANEL_URL", "http://51.75.55.16/ints/login").rstrip("/")
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://51.75.55.16/ints/agent/SMSCDRReports")
 USERNAME = os.getenv("PANEL_USERNAME", "Kkh8868himel")
-PASSWORD = os.getenv("PANEL_PASSWORD", "KkhHimel8080Target ")
+PASSWORD = os.getenv("PANEL_PASSWORD", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 
-TG_TOKEN = os.getenv("TG_TOKEN", "8999866920:AAEwsNbK1tmj2CQ9td5sN4fG7VhrXuqxj0Y").strip()
-TG_CHAT = os.getenv("TG_CHAT", "6798979733").strip()
+TG_TOKEN = os.getenv("TG_TOKEN", "").strip()
+TG_CHAT = os.getenv("TG_CHAT", "").strip()
 
 # =====================================================================
 # Safe Logging Utility

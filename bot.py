@@ -15,7 +15,7 @@ from dataclasses import dataclass
 # =====================================================================
 PANEL_URL = os.getenv("PANEL_URL", "http://51.75.55.16/ints/login").rstrip("/")
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://51.75.55.16/ints/agent/SMSCDRReports")
-USERNAME = os.getenv("PANEL_USERNAME", "Kkh8868himel")
+USERNAME = os.getenv("PANEL_USERNAME", "").strip()
 PASSWORD = os.getenv("PANEL_PASSWORD", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 
@@ -443,8 +443,8 @@ def main():
     log("⚡ TARGET SMS — STANDALONE CLOUD BOT", "INFO")
     log("==================================================", "INFO")
 
-    if not PASSWORD:
-        log("ERROR: PANEL_PASSWORD is required!", "ERROR")
+    if not USERNAME or not PASSWORD:
+        log("ERROR: Both PANEL_USERNAME and PANEL_PASSWORD are required!", "ERROR")
         sys.exit(1)
 
     tg = TelegramBot(TG_TOKEN, TG_CHAT)

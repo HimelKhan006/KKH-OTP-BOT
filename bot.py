@@ -61,7 +61,7 @@ class SMSMessage:
     has_dollar: bool = False
 
 # =====================================================================
-# Professional Telegram Bot
+# Clean Telegram Forwarder & Command Engine
 # =====================================================================
 class TelegramBot:
     def __init__(self, token: str, chat_id: str, admin_id: str = ""):
@@ -82,7 +82,7 @@ class TelegramBot:
             url = f"https://api.telegram.org/bot{self.token}/setMyCommands"
             payload = {
                 "commands": [
-                    {"command": "start", "description": "🚀 Start / Check Bot Status"}
+                    {"command": "start", "description": "🚀 Check Bot Status"}
                 ]
             }
             requests.post(url, json=payload, timeout=10)
@@ -106,7 +106,7 @@ class TelegramBot:
                     return True
                 elif resp.status_code == 429:
                     time.sleep(2)
-            except Exception as e:
+            except Exception:
                 time.sleep(1)
         return False
 
@@ -147,34 +147,8 @@ class TelegramBot:
             log(f"✅ OTP Forwarded: [{msg.service}] {msg.otp_code} -> Phone: {msg.phone_number}", "SUCCESS")
         return success
 
-    def send_admin_ready_banner(self, web_total: int = 0):
-        """Sends clean ONLINE & READY confirmation EXCLUSIVELY to Admin private chat (never in group)."""
-        target = self.admin_id
-        if not target:
-            return
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        card = (
-            "⚡ <b>TARGET SMS PRO — ONLINE & READY</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "🟢 <b>Status:</b> Active & Monitoring 24/7\n"
-            f"📊 <b>Website Total SMS:</b> <code>{web_total}</code>\n"
-            f"👥 <b>OTP Alert Group:</b> <code>{html.escape(str(self.chat_id))}</code>\n"
-            f"⏱️ <b>Refresh Speed:</b> Every {POLL_INTERVAL}s\n"
-            f"🕒 <b>Updated At:</b> <code>{now_str}</code>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "💬 <i>Listening for live incoming OTPs in real-time...</i>"
-        )
-        self.send_text(card, target)
-
-    def is_admin(self, sender_id: str, chat_id: str) -> bool:
-        allowed = {str(self.admin_id).strip(), str(ADMIN_ID).strip()}
-        allowed.discard("")
-        if not allowed:
-            return True
-        return str(sender_id).strip() in allowed or str(chat_id).strip() in allowed
-
-    def init_update_offset(self):
-        """Flushes and discards old historical Telegram messages so they are never re-processed on restart."""
+    def flush_old_updates(self):
+        """Discards all old messages so bot never re-answers historical commands."""
         if not self.token:
             return
         try:
@@ -190,7 +164,7 @@ class TelegramBot:
     def start_command_listener(self):
         if self._listener_running or not self.token:
             return
-        self.init_update_offset()
+        self.flush_old_updates()
         self._listener_running = True
         t = threading.Thread(target=self._command_loop, daemon=True)
         t.start()
@@ -207,19 +181,11 @@ class TelegramBot:
                         self.last_update_id = update["update_id"]
                         msg = update.get("message", {})
                         text = msg.get("text", "").strip()
-                        sender_id = str(msg.get("from", {}).get("id", ""))
                         sender_chat = str(msg.get("chat", {}).get("id", ""))
-                        chat_type = msg.get("chat", {}).get("type", "")
                         
                         if text:
                             raw_cmd = text.split("@")[0].lower().strip()
                             if raw_cmd == "/start":
-                                if not self.is_admin(sender_id, sender_chat):
-                                    # Stay silent in groups, only deny in private chat
-                                    if chat_type == "private":
-                                        self.send_text("⛔ <b>Access Denied</b>\n━━━━━━━━━━━━━━━━━━━━━\nOnly the authorized Admin can control this bot.", sender_chat)
-                                    continue
-
                                 reply = (
                                     "⚡ <b>TARGET SMS PRO</b>\n"
                                     "━━━━━━━━━━━━━━━━━━━━━\n"
@@ -227,7 +193,7 @@ class TelegramBot:
                                     "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
                                     f"⏱️ <b>Refresh Speed:</b> Every {POLL_INTERVAL}s\n"
                                     "━━━━━━━━━━━━━━━━━━━━━\n"
-                                    "💬 <i>Live incoming OTPs will be delivered automatically.</i>"
+                                    "💬 <i>Live incoming OTPs are delivered automatically.</i>"
                                 )
                                 self.send_text(reply, sender_chat)
             except Exception:
@@ -562,7 +528,7 @@ class TargetSession:
 # =====================================================================
 def main():
     log("==================================================", "INFO")
-    log("⚡ TARGET SMS — 24/7 NON-STOP MONITORING BOT", "INFO")
+    log("⚡ TARGET SMS — REAL-TIME OTP BOT", "INFO")
     log("==================================================", "INFO")
 
     if not USERNAME or not PASSWORD:
@@ -603,8 +569,6 @@ def main():
                     for msg in messages:
                         known_ids.add(msg.id)
                     log(f"Baseline established ({len(messages)} records on web). Monitoring for LIVE incoming OTPs...", "SUCCESS")
-                    if tg.is_configured():
-                        tg.send_admin_ready_banner(web_total=total_sms_on_web)
                     is_first_sync = False
                 else:
                     for msg in messages:

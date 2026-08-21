@@ -576,8 +576,6 @@ def main():
                     for msg in messages:
                         known_ids.add(msg.id)
                     log(f"Synced baseline ({total_sms_on_web} messages on web). Listening for LIVE OTPs...", "SUCCESS")
-                    if tg.is_configured():
-                        tg.send_startup_confirmation()
                     is_first_sync = False
                 else:
                     new_count = 0

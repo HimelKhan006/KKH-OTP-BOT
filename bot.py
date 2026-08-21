@@ -147,6 +147,25 @@ class TelegramBot:
             log(f"✅ OTP Forwarded: [{msg.service}] {msg.otp_code} -> Phone: {msg.phone_number}", "SUCCESS")
         return success
 
+    def send_admin_ready_banner(self, web_total: int = 0):
+        """Sends clean ONLINE & READY confirmation EXCLUSIVELY to Admin private chat (never in group)."""
+        target = self.admin_id
+        if not target:
+            return
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        card = (
+            "⚡ <b>TARGET SMS PRO — ONLINE & READY</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "🟢 <b>Status:</b> Active & Monitoring 24/7\n"
+            f"📊 <b>Website Total SMS:</b> <code>{web_total}</code>\n"
+            f"👥 <b>OTP Alert Group:</b> <code>{html.escape(str(self.chat_id))}</code>\n"
+            f"⏱️ <b>Refresh Speed:</b> Every {POLL_INTERVAL}s\n"
+            f"🕒 <b>Updated At:</b> <code>{now_str}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "💬 <i>Listening for live incoming OTPs in real-time...</i>"
+        )
+        self.send_text(card, target)
+
     def is_admin(self, sender_id: str, chat_id: str) -> bool:
         allowed = {str(self.admin_id).strip(), str(ADMIN_ID).strip()}
         allowed.discard("")
@@ -566,6 +585,8 @@ def main():
                     for msg in messages:
                         known_ids.add(msg.id)
                     log(f"Baseline established ({len(messages)} records on web). Monitoring for LIVE incoming OTPs...", "SUCCESS")
+                    if tg.is_configured():
+                        tg.send_admin_ready_banner(web_total=total_sms_on_web)
                     is_first_sync = False
                 else:
                     for msg in messages:

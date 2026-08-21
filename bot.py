@@ -31,7 +31,11 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", str(LOCAL_CFG.get("poll_interval"
 # Telegram Configuration
 TG_TOKEN = os.getenv("TG_TOKEN", LOCAL_CFG.get("telegram_bot_token", "8999866920:AAFigVvjviEZA8KU5RjkTqnE6dEyq5w1Nw8")).strip()
 TG_CHAT = os.getenv("TG_CHAT", LOCAL_CFG.get("telegram_chat_id", "6798979733")).strip()
-ADMIN_ID = os.getenv("ADMIN_ID", LOCAL_CFG.get("admin_id", TG_CHAT)).strip()
+ADMIN_ID = os.getenv("ADMIN_ID", LOCAL_CFG.get("admin_id", "6798979733")).strip()
+
+# Auto-Delete Delays (in seconds)
+ONLINE_MSG_DELETE_SEC = 360  # 6 minutes
+OTP_MSG_DELETE_SEC = 600     # 10 minutes
 
 # =====================================================================
 # Safe Logging Utility
@@ -59,7 +63,7 @@ class SMSMessage:
     has_dollar: bool = False
 
 # =====================================================================
-# Clean Telegram Forwarder & Command Engine (Open & Fast)
+# Telegram Engine with Auto-Delete & Admin Lock
 # =====================================================================
 class TelegramBot:
     def __init__(self, token: str, chat_id: str, admin_id: str = ""):
@@ -68,9 +72,63 @@ class TelegramBot:
         self.admin_id = admin_id or chat_id
         self.last_update_id = 0
         self._listener_running = False
+        self._delete_queue: List[Dict[str, Any]] = []
+        self._delete_lock = threading.Lock()
+        self._start_auto_deleter()
 
     def is_configured(self) -> bool:
         return bool(self.token and (self.chat_id or self.admin_id))
+
+    def _start_auto_deleter(self):
+        """Starts background worker that auto-deletes expired messages."""
+        t = threading.Thread(target=self._auto_delete_worker, daemon=True)
+        t.start()
+
+    def schedule_deletion(self, target_chat: str, message_id: int, delay_seconds: int):
+        """Schedules a message to be automatically deleted after delay_seconds."""
+        if not message_id or delay_seconds <= 0:
+            return
+        delete_time = time.time() + delay_seconds
+        with self._delete_lock:
+            self._delete_queue.append({
+                "chat_id": str(target_chat),
+                "message_id": int(message_id),
+                "delete_time": delete_time
+            })
+
+    def _auto_delete_worker(self):
+        """Runs in the background and deletes expired messages."""
+        while True:
+            try:
+                now = time.time()
+                to_delete = []
+                with self._delete_lock:
+                    remaining = []
+                    for item in self._delete_queue:
+                        if now >= item["delete_time"]:
+                            to_delete.append(item)
+                        else:
+                            remaining.append(item)
+                    self._delete_queue = remaining
+
+                for item in to_delete:
+                    self.delete_message(item["chat_id"], item["message_id"])
+
+                time.sleep(5)
+            except Exception:
+                time.sleep(5)
+
+    def delete_message(self, target_chat: str, message_id: int) -> bool:
+        """Calls Telegram deleteMessage API."""
+        if not self.token or not target_chat or not message_id:
+            return False
+        try:
+            url = f"https://api.telegram.org/bot{self.token}/deleteMessage"
+            payload = {"chat_id": target_chat, "message_id": message_id}
+            r = requests.post(url, json=payload, timeout=8)
+            return r.status_code == 200
+        except Exception:
+            return False
 
     def register_command_menu(self):
         """Registers ONLY the /start command in Telegram UI."""
@@ -87,9 +145,10 @@ class TelegramBot:
         except Exception:
             pass
 
-    def send_text(self, text: str, target_chat: str) -> bool:
+    def send_text(self, text: str, target_chat: str, auto_delete_sec: int = 0) -> Optional[int]:
+        """Sends an HTML message and optionally schedules auto-deletion."""
         if not self.token or not target_chat:
-            return False
+            return None
         for attempt in range(3):
             try:
                 url = f"https://api.telegram.org/bot{self.token}/sendMessage"
@@ -101,30 +160,37 @@ class TelegramBot:
                 }
                 resp = requests.post(url, json=payload, timeout=10)
                 if resp.status_code == 200:
-                    return True
+                    data = resp.json()
+                    msg_id = data.get("result", {}).get("message_id")
+                    if auto_delete_sec > 0 and msg_id:
+                        self.schedule_deletion(target_chat, msg_id, auto_delete_sec)
+                    return msg_id
                 elif resp.status_code == 429:
                     time.sleep(2)
             except Exception:
                 time.sleep(1)
-        return False
+        return None
 
     def send_online_confirmation(self):
-        """Sends clean ONLINE confirmation on startup."""
+        """Sends clean ONLINE confirmation (auto-deletes after 6 minutes in group)."""
         msg = (
             "⚡ <b>TARGET SMS PRO — ONLINE</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
             "🟢 <b>Status:</b> Bot is Online & Active\n"
             "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
             f"⏱️ <b>Speed:</b> Instant (every {POLL_INTERVAL}s)\n"
+            f"⏳ <b>Auto-Delete:</b> Messages clean up automatically\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
             "💬 <i>Ready to receive live incoming OTPs...</i>"
         )
         if self.chat_id:
-            self.send_text(msg, self.chat_id)
+            # Auto-delete from group after 6 minutes (360s)
+            self.send_text(msg, self.chat_id, auto_delete_sec=ONLINE_MSG_DELETE_SEC)
         if self.admin_id and str(self.admin_id) != str(self.chat_id):
-            self.send_text(msg, self.admin_id)
+            self.send_text(msg, self.admin_id, auto_delete_sec=ONLINE_MSG_DELETE_SEC)
 
     def send_otp_alert(self, msg: SMSMessage) -> bool:
+        """Sends live OTP alert (auto-deletes after 10 minutes)."""
         target = self.chat_id or self.admin_id
         if not target:
             return False
@@ -156,13 +222,22 @@ class TelegramBot:
             f"💬 <b>Message:</b>\n"
             f"<i>{safe_body}</i>\n"
         )
-        success = self.send_text(card, target)
-        if success:
-            log(f"✅ OTP Forwarded to Telegram: [{msg.service}] {msg.otp_code} -> Phone: {msg.phone_number}", "SUCCESS")
-        return success
+        
+        # Send OTP and auto-delete after 10 minutes (600s)
+        msg_id = self.send_text(card, target, auto_delete_sec=OTP_MSG_DELETE_SEC)
+        if msg_id:
+            log(f"✅ OTP Forwarded (Auto-deletes in 10m): [{msg.service}] {msg.otp_code} -> Phone: {msg.phone_number}", "SUCCESS")
+            return True
+        return False
+
+    def is_admin(self, sender_id: str, chat_id: str) -> bool:
+        """Strict check to allow only the Admin."""
+        allowed = {str(self.admin_id).strip(), str(ADMIN_ID).strip(), "6798979733"}
+        allowed.discard("")
+        return str(sender_id).strip() in allowed or str(chat_id).strip() in allowed
 
     def flush_old_updates(self):
-        """Discards all old messages so bot never re-answers historical commands."""
+        """Discards old messages so bot never re-answers historical commands."""
         if not self.token:
             return
         try:
@@ -183,13 +258,6 @@ class TelegramBot:
         t = threading.Thread(target=self._command_loop, daemon=True)
         t.start()
 
-    def is_admin(self, sender_id: str, chat_id: str) -> bool:
-        allowed = {str(self.admin_id).strip(), str(ADMIN_ID).strip()}
-        allowed.discard("")
-        if not allowed:
-            return True
-        return str(sender_id).strip() in allowed or str(chat_id).strip() in allowed
-
     def _command_loop(self):
         while self._listener_running:
             try:
@@ -208,7 +276,7 @@ class TelegramBot:
                         if text:
                             raw_cmd = text.split("@")[0].lower().strip()
                             if raw_cmd == "/start":
-                                # Strictly ignore anyone who is not the Admin
+                                # Verify Admin authorization
                                 if not self.is_admin(sender_id, sender_chat):
                                     continue
 
@@ -218,10 +286,11 @@ class TelegramBot:
                                     "🟢 <b>System Status:</b> Online & Monitoring 24/7\n"
                                     "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
                                     f"⏱️ <b>Refresh Speed:</b> Every {POLL_INTERVAL}s\n"
+                                    f"⏳ <b>Auto-Cleanup:</b> OTPs (10m) | Online Banner (6m)\n"
                                     "━━━━━━━━━━━━━━━━━━━━━\n"
-                                    "💬 <i>Live incoming OTPs are delivered automatically.</i>"
+                                    "💬 <i>Live incoming OTPs will be delivered automatically.</i>"
                                 )
-                                self.send_text(reply, sender_chat)
+                                self.send_text(reply, sender_chat, auto_delete_sec=120)
             except Exception:
                 time.sleep(3)
 
@@ -535,7 +604,7 @@ def main():
     if tg.is_configured():
         tg.register_command_menu()
         tg.start_command_listener()
-        log(f"Telegram alert channel: {TG_CHAT}", "INFO")
+        log(f"Telegram alert channel: {TG_CHAT} (Admin: {ADMIN_ID})", "INFO")
 
     session = TargetSession(PANEL_URL, USERNAME, PASSWORD)
     known_ids = set()

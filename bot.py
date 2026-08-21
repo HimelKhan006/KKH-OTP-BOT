@@ -147,6 +147,13 @@ class TelegramBot:
             log(f"✅ OTP Forwarded: [{msg.service}] {msg.otp_code} -> Phone: {msg.phone_number}", "SUCCESS")
         return success
 
+    def is_admin(self, sender_id: str, chat_id: str) -> bool:
+        allowed = {str(self.admin_id).strip(), str(ADMIN_ID).strip()}
+        allowed.discard("")
+        if not allowed:
+            return True
+        return str(sender_id).strip() in allowed or str(chat_id).strip() in allowed
+
     def start_command_listener(self):
         if self._listener_running or not self.token:
             return
@@ -166,11 +173,16 @@ class TelegramBot:
                         self.last_update_id = update["update_id"]
                         msg = update.get("message", {})
                         text = msg.get("text", "").strip()
+                        sender_id = str(msg.get("from", {}).get("id", ""))
                         sender_chat = str(msg.get("chat", {}).get("id", ""))
                         
                         if text:
                             raw_cmd = text.split("@")[0].lower().strip()
                             if raw_cmd == "/start":
+                                if not self.is_admin(sender_id, sender_chat):
+                                    self.send_text("⛔ <b>Access Denied</b>\n━━━━━━━━━━━━━━━━━━━━━\nOnly the authorized Admin can control this bot.", sender_chat)
+                                    continue
+
                                 reply = (
                                     "⚡ <b>TARGET SMS PRO</b>\n"
                                     "━━━━━━━━━━━━━━━━━━━━━\n"

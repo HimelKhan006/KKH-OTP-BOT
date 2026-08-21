@@ -40,7 +40,7 @@ GIST_TOKEN = os.getenv("GIST_TOKEN", os.getenv("GH_TOKEN", os.getenv("GITHUB_TOK
 GIST_ID = os.getenv("GIST_ID", LOCAL_CFG.get("gist_id", "")).strip()
 
 # Master Encryption Key (Derived from Token & Credentials for maximum hacker defense)
-VAULT_KEY = f"{TG_TOKEN}_{ADMIN_ID}_kkh_secure_vault_2026"
+VAULT_KEY = f"{TG_TOKEN}_{ADMIN_ID}_target_sms_vault_key"
 
 # Auto-Delete Delays
 ONLINE_MSG_DELETE_SEC = 360     # 6 minutes
@@ -62,55 +62,61 @@ def log(msg: str, level: str = "INFO"):
 # Military-Grade Authenticated Database Encryption Vault
 # =====================================================================
 class SecureVault:
-    """PBKDF2-HMAC-SHA256 Authenticated Encryption for Database Protection against Hackers."""
+    """PBKDF2-HMAC-SHA256-CTR Authenticated Encryption Vault."""
     @staticmethod
-    def derive_key(secret_seed: str, salt: bytes = b"kkh_db_vault_salt_2026") -> bytes:
-        return hashlib.pbkdf2_hmac("sha256", secret_seed.encode("utf-8"), salt, 20000, dklen=32)
+    def derive_key(secret_seed: str, salt: bytes) -> bytes:
+        return hashlib.pbkdf2_hmac("sha256", secret_seed.encode("utf-8"), salt, 50000, dklen=32)
 
     @classmethod
-    def encrypt(cls, plaintext: str, key_seed: str) -> str:
+    def encrypt(cls, plaintext: str, key_seed: str) -> Dict[str, Any]:
         if not plaintext:
-            return ""
+            plaintext = "{}"
         salt = os.urandom(16)
+        iv = os.urandom(16)
         key = cls.derive_key(key_seed, salt)
         data = plaintext.encode("utf-8")
         
         keystream = bytearray()
         counter = 0
         while len(keystream) < len(data):
-            block = hashlib.sha256(key + salt + counter.to_bytes(4, 'big')).digest()
+            block = hashlib.sha256(key + iv + counter.to_bytes(4, 'big')).digest()
             keystream.extend(block)
             counter += 1
             
         ciphertext = bytes([b ^ k for b, k in zip(data, keystream[:len(data)])])
-        auth_tag = hmac.new(key, salt + ciphertext, hashlib.sha256).digest()
-        payload = salt + auth_tag + ciphertext
-        return "ENC::" + base64.urlsafe_b64encode(payload).decode("ascii")
+        mac = hmac.new(key, salt + iv + ciphertext, hashlib.sha256).digest()
+        
+        return {
+            "ver": "1.0",
+            "enc": "PBKDF2-HMAC-SHA256-CTR",
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "iv": base64.b64encode(iv).decode("ascii"),
+            "mac": base64.b64encode(mac).decode("ascii"),
+            "ciphertext": base64.b64encode(ciphertext).decode("ascii")
+        }
 
     @classmethod
-    def decrypt(cls, encrypted_str: str, key_seed: str) -> str:
-        if not encrypted_str:
-            return ""
-        if not encrypted_str.startswith("ENC::"):
-            return encrypted_str  # Plaintext fallback for legacy records
-            
+    def decrypt(cls, payload: Any, key_seed: str) -> str:
         try:
-            raw = base64.urlsafe_b64decode(encrypted_str[5:].encode("ascii"))
-            if len(raw) < 48:
+            if not isinstance(payload, dict) or "ciphertext" not in payload:
+                if isinstance(payload, str):
+                    return payload
                 return ""
-            salt = raw[:16]
-            expected_tag = raw[16:48]
-            ciphertext = raw[48:]
+            salt = base64.b64decode(payload["salt"])
+            iv = base64.b64decode(payload["iv"])
+            mac = base64.b64decode(payload["mac"])
+            ciphertext = base64.b64decode(payload["ciphertext"])
             
             key = cls.derive_key(key_seed, salt)
-            calc_tag = hmac.new(key, salt + ciphertext, hashlib.sha256).digest()
-            if not hmac.compare_digest(expected_tag, calc_tag):
-                return ""  # Tampered or invalid key
+            calc_mac = hmac.new(key, salt + iv + ciphertext, hashlib.sha256).digest()
+            if not hmac.compare_digest(mac, calc_mac):
+                return ""
                 
             keystream = bytearray()
             counter = 0
             while len(keystream) < len(ciphertext):
-                block = hashlib.sha256(key + salt + counter.to_bytes(4, 'big')).digest()
+                block = hashlib.sha256(key + iv + counter.to_bytes(4, 'big')).digest()
                 keystream.extend(block)
                 counter += 1
                 
@@ -137,13 +143,13 @@ class SMSMessage:
 # Encrypted GitHub Gist 24-Hour Database Engine (Anti-Hacker / Zero-Duplicate)
 # =====================================================================
 class GistDatabase:
-    """Persistent cloud storage with encrypted payload and 24-hour message purging."""
-    FILE_NAME = "kkh_otp_encrypted_vault.json"
+    """Persistent cloud storage matching custom Gist schema with 24h message purging."""
+    FILE_NAME = "target_sms_database.json"
 
     def __init__(self, token: str = "", gist_id: str = ""):
         self.token = token.strip()
         self.gist_id = gist_id.strip()
-        self.local_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otp_history.json")
+        self.local_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "target_sms_database.json")
         self.data: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self.init_gist_on_startup()
@@ -174,20 +180,13 @@ class GistDatabase:
 
                 # 2. If not found, immediately create it on GitHub
                 plain_json = json.dumps({})
-                encrypted_blob = SecureVault.encrypt(plain_json, VAULT_KEY)
-                wrapper = {
-                    "vault_version": "2.0_ENCRYPTED",
-                    "admin_shield": "PROTECTED",
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "total_records": 0,
-                    "encrypted_payload": encrypted_blob
-                }
+                payload_enc = SecureVault.encrypt(plain_json, VAULT_KEY)
                 payload = {
-                    "description": "🔒 KKH Target SMS — Encrypted OTP Database",
+                    "description": "Target SMS Live OTP Bot — Encrypted Persistent Database",
                     "public": False,
                     "files": {
                         self.FILE_NAME: {
-                            "content": json.dumps(wrapper, indent=2)
+                            "content": json.dumps(payload_enc, indent=2)
                         }
                     }
                 }
@@ -224,13 +223,11 @@ class GistDatabase:
                     if self.FILE_NAME in files:
                         raw = files[self.FILE_NAME].get("content", "{}")
                         wrapper = json.loads(raw)
-                        enc_blob = wrapper.get("encrypted_payload", "")
-                        if enc_blob:
-                            dec_text = SecureVault.decrypt(enc_blob, VAULT_KEY)
-                            if dec_text:
-                                self.data = json.loads(dec_text)
-                                loaded = True
-                                log(f"🔒 Loaded & Decrypted {len(self.data)} secure records from GitHub Gist database.", "SUCCESS")
+                        dec_text = SecureVault.decrypt(wrapper, VAULT_KEY)
+                        if dec_text:
+                            self.data = json.loads(dec_text)
+                            loaded = True
+                            log(f"🔒 Loaded & Decrypted {len(self.data)} secure records from GitHub Gist database.", "SUCCESS")
             except Exception as e:
                 log(f"Gist load notice: {e}", "WARNING")
 
@@ -238,11 +235,10 @@ class GistDatabase:
             try:
                 with open(self.local_file, "r", encoding="utf-8") as f:
                     wrapper = json.load(f)
-                    if isinstance(wrapper, dict) and "encrypted_payload" in wrapper:
-                        dec_text = SecureVault.decrypt(wrapper["encrypted_payload"], VAULT_KEY)
-                        if dec_text:
-                            self.data = json.loads(dec_text)
-                    else:
+                    dec_text = SecureVault.decrypt(wrapper, VAULT_KEY)
+                    if dec_text:
+                        self.data = json.loads(dec_text)
+                    elif isinstance(wrapper, dict):
                         self.data = wrapper
             except Exception:
                 pass
@@ -253,21 +249,14 @@ class GistDatabase:
         """Encrypts sensitive data and syncs with local file & GitHub Gist."""
         self.purge_expired()
         
-        # Package encrypted database payload with security metadata
+        # Package encrypted database payload in custom PBKDF2 schema
         plain_json = json.dumps(self.data)
-        encrypted_blob = SecureVault.encrypt(plain_json, VAULT_KEY)
-        wrapper = {
-            "vault_version": "2.0_ENCRYPTED",
-            "admin_shield": "PROTECTED",
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "total_records": len(self.data),
-            "encrypted_payload": encrypted_blob
-        }
+        encrypted_wrapper = SecureVault.encrypt(plain_json, VAULT_KEY)
 
         # 1. Local secure write
         try:
             with open(self.local_file, "w", encoding="utf-8") as f:
-                json.dump(wrapper, f, indent=2)
+                json.dump(encrypted_wrapper, f, indent=2)
         except Exception:
             pass
 
@@ -278,10 +267,10 @@ class GistDatabase:
         try:
             headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json"}
             payload = {
-                "description": "🔒 KKH Target SMS — Military-Grade Encrypted OTP Database",
+                "description": "Target SMS Live OTP Bot — Encrypted Persistent Database",
                 "files": {
                     self.FILE_NAME: {
-                        "content": json.dumps(wrapper, indent=2)
+                        "content": json.dumps(encrypted_wrapper, indent=2)
                     }
                 }
             }

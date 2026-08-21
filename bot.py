@@ -7,8 +7,7 @@ import json
 import hashlib
 import threading
 import requests
-from datetime import datetime
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
@@ -25,7 +24,6 @@ if os.path.exists(CONFIG_FILE):
         pass
 
 PANEL_URL = os.getenv("PANEL_URL", LOCAL_CFG.get("panel_url", "http://51.75.55.16/ints/login")).rstrip("/")
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", LOCAL_CFG.get("dashboard_url", "http://51.75.55.16/ints/agent/SMSCDRReports"))
 USERNAME = os.getenv("PANEL_USERNAME", LOCAL_CFG.get("username", "Kkh8868himel")).strip()
 PASSWORD = os.getenv("PANEL_PASSWORD", LOCAL_CFG.get("password", "KkhHimel8080Target "))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", str(LOCAL_CFG.get("poll_interval", 3))))
@@ -110,6 +108,22 @@ class TelegramBot:
                 time.sleep(1)
         return False
 
+    def send_online_confirmation(self):
+        """Sends clean ONLINE confirmation to both connected group and Admin private chat."""
+        msg = (
+            "⚡ <b>TARGET SMS PRO — ONLINE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "🟢 <b>Status:</b> Bot is Online & Active\n"
+            "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
+            f"⏱️ <b>Speed:</b> Instant (every {POLL_INTERVAL}s)\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "💬 <i>Ready to receive live incoming OTPs...</i>"
+        )
+        if self.chat_id:
+            self.send_text(msg, self.chat_id)
+        if self.admin_id and str(self.admin_id) != str(self.chat_id):
+            self.send_text(msg, self.admin_id)
+
     def send_otp_alert(self, msg: SMSMessage) -> bool:
         target = self.chat_id or self.admin_id
         if not target:
@@ -144,23 +158,8 @@ class TelegramBot:
         )
         success = self.send_text(card, target)
         if success:
-            log(f"✅ OTP Forwarded: [{msg.service}] {msg.otp_code} -> Phone: {msg.phone_number}", "SUCCESS")
+            log(f"✅ OTP Forwarded to Telegram: [{msg.service}] {msg.otp_code} -> Phone: {msg.phone_number}", "SUCCESS")
         return success
-
-    def send_online_confirmation(self):
-        """Sends clean ONLINE confirmation to both connected group and Admin private chat."""
-        msg = (
-            "⚡ <b>TARGET SMS PRO — ONLINE</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "🟢 <b>Status:</b> Bot is Online & Active\n"
-            "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "💬 <i>Ready to receive live incoming OTPs...</i>"
-        )
-        if self.chat_id:
-            self.send_text(msg, self.chat_id)
-        if self.admin_id and str(self.admin_id) != str(self.chat_id):
-            self.send_text(msg, self.admin_id)
 
     def flush_old_updates(self):
         """Discards all old messages so bot never re-answers historical commands."""
@@ -277,32 +276,6 @@ class SMSParser:
         return parts[0] if parts else range_clean
 
     @classmethod
-    def extract_total_sms(cls, html_content: str) -> int:
-        if not html_content:
-            return 0
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            for tag in soup.find_all(string=re.compile(r'Total\s+SMS', re.IGNORECASE)):
-                parent = tag.parent
-                for container in [parent, parent.parent if parent else None, parent.parent.parent if parent and parent.parent else None]:
-                    if container:
-                        text = container.get_text(' ', strip=True)
-                        m = re.search(r'Total\s+SMS\s*[:=-]?\s*(\d+)', text, re.IGNORECASE)
-                        if m:
-                            return int(m.group(1))
-                        nums = re.findall(r'\b\d+\b', text)
-                        if nums:
-                            return int(nums[0])
-            
-            text_clean = soup.get_text(' ', strip=True)
-            m = re.search(r'Total\s+SMS\s*[:=-]?\s*(\d+)', text_clean, re.IGNORECASE)
-            if m:
-                return int(m.group(1))
-        except Exception:
-            pass
-        return 0
-
-    @classmethod
     def extract_otp(cls, text: str) -> str:
         if not text:
             return ""
@@ -355,7 +328,7 @@ class SMSParser:
 
     @classmethod
     def is_valid_row(cls, timestamp: str, phone: str, text: str) -> bool:
-        if not text or len(text.strip()) < 5:
+        if not text or len(text.strip()) < 4:
             return False
         
         lower_text = text.lower().strip()
@@ -373,84 +346,44 @@ class SMSParser:
         return True
 
     @classmethod
-    def parse_html(cls, html_content: str) -> List[SMSMessage]:
-        if not html_content:
-            return []
-
-        soup = BeautifulSoup(html_content, "html.parser")
+    def parse_ajax_data(cls, aa_data: List[Any]) -> List[SMSMessage]:
         messages: List[SMSMessage] = []
-
-        tables = soup.find_all("table")
-        for table in tables:
-            rows = table.find_all("tr")
-            if not rows:
+        for row in aa_data:
+            if not isinstance(row, list) or len(row) < 6:
                 continue
 
-            headers = [h.get_text(strip=True).lower() for h in rows[0].find_all(["th", "td"])]
+            timestamp = str(row[0] or "").strip()
+            carrier_range = str(row[1] or "").strip()
+            phone = str(row[2] or "").strip()
+            cli_val = str(row[3] or "").strip()
+            sms_text = str(row[5] or "").strip()
+            
+            # Dollar flag
+            row_joined = " ".join(str(x or "") for x in row)
+            has_dollar = "$" in row_joined
 
-            for row in rows[1:]:
-                cells = row.find_all(["td", "th"])
-                if not cells:
-                    continue
-                cols = [c.get_text(" ", strip=True) for c in cells]
-                if len(cols) < 4:
-                    continue
+            if not cls.is_valid_row(timestamp, phone, sms_text):
+                continue
 
-                timestamp = ""
-                carrier_range = ""
-                phone = ""
-                cli_val = ""
-                sms_text = ""
-                has_dollar = False
+            otp_code = cls.extract_otp(sms_text)
+            service = cls.detect_service(sms_text, cli_val)
+            clean_country = cls.extract_country_name(carrier_range)
+            msg_id = hashlib.md5(f"{timestamp}_{phone}_{sms_text}".encode("utf-8")).hexdigest()
 
-                if "$" in " ".join(cols):
-                    has_dollar = True
-
-                if len(headers) >= len(cols):
-                    for idx, val in enumerate(cols):
-                        h = headers[idx]
-                        if "date" in h or "time" in h:
-                            timestamp = val
-                        elif "range" in h:
-                            carrier_range = val
-                        elif "number" in h or "phone" in h:
-                            phone = val
-                        elif "cli" in h or "sender" in h:
-                            cli_val = val
-                        elif "sms" in h or "msg" in h or "text" in h:
-                            sms_text = val
-
-                if not sms_text or not phone:
-                    if len(cols) >= 6:
-                        timestamp = cols[0]
-                        carrier_range = cols[1]
-                        phone = cols[2]
-                        cli_val = cols[3]
-                        sms_text = cols[5]
-
-                if not cls.is_valid_row(timestamp, phone, sms_text):
-                    continue
-
-                otp_code = cls.extract_otp(sms_text)
-                service = cls.detect_service(sms_text, cli_val)
-                clean_country = cls.extract_country_name(carrier_range)
-                msg_id = hashlib.md5(f"{timestamp}_{phone}_{sms_text}".encode("utf-8")).hexdigest()
-
-                messages.append(SMSMessage(
-                    id=msg_id,
-                    service=service,
-                    phone_number=phone,
-                    otp_code=otp_code,
-                    full_text=sms_text,
-                    timestamp=timestamp,
-                    carrier_range=clean_country,
-                    has_dollar=has_dollar
-                ))
-
+            messages.append(SMSMessage(
+                id=msg_id,
+                service=service,
+                phone_number=phone,
+                otp_code=otp_code,
+                full_text=sms_text,
+                timestamp=timestamp,
+                carrier_range=clean_country,
+                has_dollar=has_dollar
+            ))
         return messages
 
 # =====================================================================
-# Target SMS HTTP Session & Auto Captcha Engine
+# Target SMS HTTP Session & Live AJAX Feed
 # =====================================================================
 class TargetSession:
     def __init__(self, base_url: str, username: str, password: str):
@@ -462,6 +395,8 @@ class TargetSession:
             self.login_url = f"{self.ints_base}/login"
 
         self.signin_url = f"{self.ints_base}/signin"
+        self.ajax_url = f"{self.ints_base}/agent/res/data_smscdr.php"
+        self.dashboard_page = f"{self.ints_base}/agent/SMSCDRReports"
         self.username = username
         self.password = password
         self.session = requests.Session()
@@ -506,7 +441,7 @@ class TargetSession:
                 log("Authenticated successfully with panel.", "SUCCESS")
                 return True
 
-            test_resp = self.session.get(DASHBOARD_URL, allow_redirects=False, timeout=10)
+            test_resp = self.session.get(self.dashboard_page, allow_redirects=False, timeout=10)
             if test_resp.status_code == 200:
                 self.is_logged_in = True
                 log("Session active and verified.", "SUCCESS")
@@ -521,33 +456,66 @@ class TargetSession:
             self.is_logged_in = False
             return False
 
-    def fetch_dashboard(self) -> Optional[str]:
+    def fetch_live_sms(self) -> List[SMSMessage]:
+        """Fetches live incoming SMS records via the panel's AJAX API endpoint."""
         try:
-            resp = self.session.get(DASHBOARD_URL, allow_redirects=True, timeout=12)
-            if "login" in resp.url or "signin" in resp.text:
-                self.is_logged_in = False
-                if self.login():
-                    resp = self.session.get(DASHBOARD_URL, allow_redirects=True, timeout=12)
-                else:
-                    return None
+            today = datetime.now().strftime("%Y-%m-%d")
+            start_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+            
+            params = {
+                "fdate1": f"{start_date} 00:00:00",
+                "fdate2": f"{today} 23:59:59",
+                "frange": "",
+                "fclient": "",
+                "fnum": "",
+                "fcli": "",
+                "fgdate": "",
+                "fgmonth": "",
+                "fgrange": "",
+                "fgclient": "",
+                "fgnumber": "",
+                "fgcli": "",
+                "fg": "0",
+                "iDisplayLength": "100"
+            }
+            headers = {
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": self.dashboard_page,
+                "Accept": "application/json, text/javascript, */*; q=0.01"
+            }
+
+            resp = self.session.get(self.ajax_url, params=params, headers=headers, timeout=12)
 
             if resp.status_code == 200:
-                return resp.text
-            return None
+                if "Direct Script Access" in resp.text or "login" in resp.text:
+                    self.is_logged_in = False
+                    if self.login():
+                        resp = self.session.get(self.ajax_url, params=params, headers=headers, timeout=12)
+                    else:
+                        return []
+
+                try:
+                    data = resp.json()
+                    aa_data = data.get("aaData", [])
+                    return SMSParser.parse_ajax_data(aa_data)
+                except Exception:
+                    return []
+            else:
+                self.is_logged_in = False
+                return []
         except Exception:
-            self.is_logged_in = False
-            return None
+            return []
 
 # =====================================================================
 # 24/7 Continuous Monitoring Main Loop (Never Exits)
 # =====================================================================
 def main():
     log("==================================================", "INFO")
-    log("⚡ TARGET SMS — REAL-TIME OTP BOT", "INFO")
+    log("⚡ TARGET SMS — REAL-TIME LIVE OTP BOT", "INFO")
     log("==================================================", "INFO")
 
     if not USERNAME or not PASSWORD:
-        log("ERROR: Both USERNAME and PASSWORD are required!", "ERROR")
+        log("ERROR: Both USERNAME and PASSWORD are required in config.json or environment variables!", "ERROR")
         time.sleep(10)
         return
 
@@ -574,27 +542,23 @@ def main():
                     continue
 
             consecutive_errors = 0
-            html = session.fetch_dashboard()
+            messages = session.fetch_live_sms()
 
-            if html:
-                total_sms_on_web = SMSParser.extract_total_sms(html)
-                messages = SMSParser.parse_html(html)
-
-                if is_first_sync:
-                    for msg in messages:
+            if is_first_sync:
+                for msg in messages:
+                    known_ids.add(msg.id)
+                log(f"Baseline established ({len(messages)} live records synchronized from website).", "SUCCESS")
+                if tg.is_configured():
+                    tg.send_online_confirmation()
+                is_first_sync = False
+            else:
+                for msg in messages:
+                    if msg.id not in known_ids:
                         known_ids.add(msg.id)
-                    log(f"Baseline established ({len(messages)} records on web). Monitoring for LIVE incoming OTPs...", "SUCCESS")
-                    if tg.is_configured():
-                        tg.send_online_confirmation()
-                    is_first_sync = False
-                else:
-                    for msg in messages:
-                        if msg.id not in known_ids:
-                            known_ids.add(msg.id)
-                            dollar_str = " | 💵 $" if msg.has_dollar else ""
-                            log(f"🔔 LIVE OTP! [{msg.service}] Code: {msg.otp_code} | Phone: {msg.phone_number} | Country: {msg.carrier_range}{dollar_str}", "SUCCESS")
-                            if tg.is_configured():
-                                tg.send_otp_alert(msg)
+                        dollar_str = " | 💵 $" if msg.has_dollar else ""
+                        log(f"🔔 LIVE OTP! [{msg.service}] Code: {msg.otp_code} | Phone: {msg.phone_number} | Country: {msg.carrier_range}{dollar_str}", "SUCCESS")
+                        if tg.is_configured():
+                            tg.send_otp_alert(msg)
 
             time.sleep(POLL_INTERVAL)
 

@@ -4,7 +4,9 @@ import sys
 import time
 import html
 import json
+import base64
 import hashlib
+import hmac
 import threading
 import requests
 from datetime import datetime, timedelta
@@ -37,6 +39,9 @@ ADMIN_ID = os.getenv("ADMIN_ID", LOCAL_CFG.get("admin_id", "6798979733")).strip(
 GIST_TOKEN = os.getenv("GIST_TOKEN", os.getenv("GH_TOKEN", os.getenv("GITHUB_TOKEN", LOCAL_CFG.get("gist_token", "")))).strip()
 GIST_ID = os.getenv("GIST_ID", LOCAL_CFG.get("gist_id", "")).strip()
 
+# Master Encryption Key (Derived from Token & Credentials for maximum hacker defense)
+VAULT_KEY = f"{TG_TOKEN}_{ADMIN_ID}_kkh_secure_vault_2026"
+
 # Auto-Delete Delays
 ONLINE_MSG_DELETE_SEC = 360     # 6 minutes
 OTP_MSG_DELETE_SEC = 600        # 10 minutes
@@ -54,6 +59,67 @@ def log(msg: str, level: str = "INFO"):
     print(f"[{t}] [{level}] {clean}", flush=True)
 
 # =====================================================================
+# Military-Grade Authenticated Database Encryption Vault
+# =====================================================================
+class SecureVault:
+    """PBKDF2-HMAC-SHA256 Authenticated Encryption for Database Protection against Hackers."""
+    @staticmethod
+    def derive_key(secret_seed: str, salt: bytes = b"kkh_db_vault_salt_2026") -> bytes:
+        return hashlib.pbkdf2_hmac("sha256", secret_seed.encode("utf-8"), salt, 20000, dklen=32)
+
+    @classmethod
+    def encrypt(cls, plaintext: str, key_seed: str) -> str:
+        if not plaintext:
+            return ""
+        salt = os.urandom(16)
+        key = cls.derive_key(key_seed, salt)
+        data = plaintext.encode("utf-8")
+        
+        keystream = bytearray()
+        counter = 0
+        while len(keystream) < len(data):
+            block = hashlib.sha256(key + salt + counter.to_bytes(4, 'big')).digest()
+            keystream.extend(block)
+            counter += 1
+            
+        ciphertext = bytes([b ^ k for b, k in zip(data, keystream[:len(data)])])
+        auth_tag = hmac.new(key, salt + ciphertext, hashlib.sha256).digest()
+        payload = salt + auth_tag + ciphertext
+        return "ENC::" + base64.urlsafe_b64encode(payload).decode("ascii")
+
+    @classmethod
+    def decrypt(cls, encrypted_str: str, key_seed: str) -> str:
+        if not encrypted_str:
+            return ""
+        if not encrypted_str.startswith("ENC::"):
+            return encrypted_str  # Plaintext fallback for legacy records
+            
+        try:
+            raw = base64.urlsafe_b64decode(encrypted_str[5:].encode("ascii"))
+            if len(raw) < 48:
+                return ""
+            salt = raw[:16]
+            expected_tag = raw[16:48]
+            ciphertext = raw[48:]
+            
+            key = cls.derive_key(key_seed, salt)
+            calc_tag = hmac.new(key, salt + ciphertext, hashlib.sha256).digest()
+            if not hmac.compare_digest(expected_tag, calc_tag):
+                return ""  # Tampered or invalid key
+                
+            keystream = bytearray()
+            counter = 0
+            while len(keystream) < len(ciphertext):
+                block = hashlib.sha256(key + salt + counter.to_bytes(4, 'big')).digest()
+                keystream.extend(block)
+                counter += 1
+                
+            plaintext = bytes([b ^ k for b, k in zip(ciphertext, keystream[:len(ciphertext)])])
+            return plaintext.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+# =====================================================================
 # Data Model
 # =====================================================================
 @dataclass
@@ -68,11 +134,11 @@ class SMSMessage:
     has_dollar: bool = False
 
 # =====================================================================
-# GitHub Gist 24-Hour Database Engine (Zero Duplicates Across Restarts)
+# Encrypted GitHub Gist 24-Hour Database Engine (Anti-Hacker / Zero-Duplicate)
 # =====================================================================
 class GistDatabase:
-    """Persistent cloud storage with automatic 24-hour message purging."""
-    FILE_NAME = "kkh_otp_history.json"
+    """Persistent cloud storage with encrypted payload and 24-hour message purging."""
+    FILE_NAME = "kkh_otp_encrypted_vault.json"
 
     def __init__(self, token: str = "", gist_id: str = ""):
         self.token = token
@@ -94,7 +160,7 @@ class GistDatabase:
             self.data = fresh
 
     def load(self):
-        """Loads database from GitHub Gist or local cache."""
+        """Loads database from GitHub Gist or local cache and decrypts."""
         loaded = False
         if self.token and self.gist_id:
             try:
@@ -105,43 +171,65 @@ class GistDatabase:
                     files = r.json().get("files", {})
                     if self.FILE_NAME in files:
                         raw = files[self.FILE_NAME].get("content", "{}")
-                        self.data = json.loads(raw)
-                        loaded = True
-                        log(f"Synced {len(self.data)} OTP records from GitHub Gist database.", "SUCCESS")
+                        wrapper = json.loads(raw)
+                        enc_blob = wrapper.get("encrypted_payload", "")
+                        if enc_blob:
+                            dec_text = SecureVault.decrypt(enc_blob, VAULT_KEY)
+                            if dec_text:
+                                self.data = json.loads(dec_text)
+                                loaded = True
+                                log(f"🔒 Loaded & Decrypted {len(self.data)} secure records from GitHub Gist database.", "SUCCESS")
             except Exception as e:
                 log(f"Gist load notice: {e}", "WARNING")
 
         if not loaded and os.path.exists(self.local_file):
             try:
                 with open(self.local_file, "r", encoding="utf-8") as f:
-                    self.data = json.load(f)
+                    wrapper = json.load(f)
+                    if isinstance(wrapper, dict) and "encrypted_payload" in wrapper:
+                        dec_text = SecureVault.decrypt(wrapper["encrypted_payload"], VAULT_KEY)
+                        if dec_text:
+                            self.data = json.loads(dec_text)
+                    else:
+                        self.data = wrapper
             except Exception:
                 pass
 
         self.purge_expired()
 
     def save(self):
-        """Saves database to local file and syncs with GitHub Gist."""
+        """Encrypts sensitive data and syncs with local file & GitHub Gist."""
         self.purge_expired()
         
-        # 1. Local save
+        # Package encrypted database payload with security metadata
+        plain_json = json.dumps(self.data)
+        encrypted_blob = SecureVault.encrypt(plain_json, VAULT_KEY)
+        wrapper = {
+            "vault_version": "2.0_ENCRYPTED",
+            "admin_shield": "PROTECTED",
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_records": len(self.data),
+            "encrypted_payload": encrypted_blob
+        }
+
+        # 1. Local secure write
         try:
             with open(self.local_file, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=2)
+                json.dump(wrapper, f, indent=2)
         except Exception:
             pass
 
-        # 2. GitHub Gist save
+        # 2. GitHub Gist encrypted sync
         if not self.token:
             return
 
         try:
             headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json"}
             payload = {
-                "description": "KKH Target SMS Live OTP Database",
+                "description": "🔒 KKH Target SMS — Military-Grade Encrypted OTP Database",
                 "files": {
                     self.FILE_NAME: {
-                        "content": json.dumps(self.data, indent=2)
+                        "content": json.dumps(wrapper, indent=2)
                     }
                 }
             }
@@ -155,7 +243,7 @@ class GistDatabase:
                 r = requests.post(url, headers=headers, json=payload, timeout=10)
                 if r.status_code == 201:
                     self.gist_id = r.json().get("id", "")
-                    log(f"Created new GitHub Gist database (ID: {self.gist_id})", "SUCCESS")
+                    log(f"Created new Encrypted GitHub Gist database (ID: {self.gist_id})", "SUCCESS")
         except Exception:
             pass
 
@@ -172,7 +260,8 @@ class GistDatabase:
                 "service": msg.service,
                 "phone": msg.phone_number,
                 "otp": msg.otp_code,
-                "timestamp": msg.timestamp
+                "timestamp": msg.timestamp,
+                "admin_id": ADMIN_ID
             }
         self.save()
 
@@ -380,7 +469,7 @@ class TelegramBot:
                                     "🟢 <b>System Status:</b> Online & Monitoring 24/7\n"
                                     "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
                                     f"⏱️ <b>Refresh Speed:</b> Every {POLL_INTERVAL}s\n"
-                                    "🗄️ <b>Database:</b> 24-Hour Anti-Duplicate Memory\n"
+                                    "🔒 <b>Vault:</b> Encrypted 24h Anti-Hacker Storage\n"
                                     "⏳ <b>Auto-Cleanup:</b> OTPs (10m)\n"
                                     "━━━━━━━━━━━━━━━━━━━━━\n"
                                     "💬 <i>Live incoming OTPs will be delivered automatically.</i>"
@@ -695,7 +784,7 @@ def main():
         time.sleep(10)
         return
 
-    # Initialize GitHub Gist Database (24h Memory)
+    # Initialize Encrypted GitHub Gist Database (24h Memory)
     db = GistDatabase(GIST_TOKEN, GIST_ID)
 
     tg = TelegramBot(TG_TOKEN, TG_CHAT, ADMIN_ID)
@@ -726,7 +815,7 @@ def main():
                 for msg in messages:
                     if not db.has_message(msg.id):
                         db.add_message(msg)
-                log(f"Baseline established ({len(messages)} live records synchronized into 24h database).", "SUCCESS")
+                log(f"Baseline established ({len(messages)} live records synchronized into encrypted 24h database).", "SUCCESS")
                 is_first_sync = False
             else:
                 for msg in messages:

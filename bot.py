@@ -7,7 +7,7 @@ import json
 import hashlib
 import threading
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from bs4 import BeautifulSoup
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
@@ -61,7 +61,7 @@ class SMSMessage:
     has_dollar: bool = False
 
 # =====================================================================
-# Professional Telegram Bot (Clean /start Only & Instant OTP Forwarder)
+# Professional Telegram Bot
 # =====================================================================
 class TelegramBot:
     def __init__(self, token: str, chat_id: str, admin_id: str = ""):
@@ -92,42 +92,25 @@ class TelegramBot:
     def send_text(self, text: str, target_chat: str) -> bool:
         if not self.token or not target_chat:
             return False
-        try:
-            url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-            payload = {
-                "chat_id": target_chat,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            }
-            resp = requests.post(url, json=payload, timeout=10)
-            if resp.status_code == 200:
-                return True
-            else:
-                log(f"Telegram API response: {resp.status_code} - {resp.text}", "WARNING")
-                return False
-        except Exception as e:
-            log(f"Telegram error sending to {target_chat}: {e}", "ERROR")
-            return False
-
-    def send_startup_confirmation(self):
-        """Sends clean professional startup message to connected chat/group and admin."""
-        msg = (
-            "⚡ <b>TARGET SMS PRO — ONLINE</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "🟢 <b>Status:</b> Connected & Active\n"
-            "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
-            "⏱️ <b>Speed:</b> Instant (every 3s)\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "💬 <i>Listening for live incoming OTPs in real-time...</i>"
-        )
-        if self.chat_id:
-            self.send_text(msg, self.chat_id)
-        if self.admin_id and str(self.admin_id) != str(self.chat_id):
-            self.send_text(msg, self.admin_id)
+        for attempt in range(3):
+            try:
+                url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+                payload = {
+                    "chat_id": target_chat,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True
+                }
+                resp = requests.post(url, json=payload, timeout=10)
+                if resp.status_code == 200:
+                    return True
+                elif resp.status_code == 429:
+                    time.sleep(2)
+            except Exception as e:
+                time.sleep(1)
+        return False
 
     def send_otp_alert(self, msg: SMSMessage) -> bool:
-        """Sends LIVE OTP message cleanly to the connected group / chat."""
         target = self.chat_id or self.admin_id
         if not target:
             return False
@@ -161,11 +144,10 @@ class TelegramBot:
         )
         success = self.send_text(card, target)
         if success:
-            log(f"✅ Alert sent to Telegram [{target}]: OTP {msg.otp_code} ({msg.service})", "SUCCESS")
+            log(f"✅ OTP Forwarded: [{msg.service}] {msg.otp_code} -> Phone: {msg.phone_number}", "SUCCESS")
         return success
 
     def start_command_listener(self):
-        """Listens ONLY for /start command to send simple confirmation."""
         if self._listener_running or not self.token:
             return
         self._listener_running = True
@@ -192,10 +174,11 @@ class TelegramBot:
                                 reply = (
                                     "⚡ <b>TARGET SMS PRO</b>\n"
                                     "━━━━━━━━━━━━━━━━━━━━━\n"
-                                    "🟢 <b>System Status:</b> Online & Active\n"
+                                    "🟢 <b>System Status:</b> Online & Monitoring 24/7\n"
                                     "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
+                                    f"⏱️ <b>Refresh Speed:</b> Every {POLL_INTERVAL}s\n"
                                     "━━━━━━━━━━━━━━━━━━━━━\n"
-                                    "💬 <i>Live incoming OTPs will be delivered automatically.</i>"
+                                    "💬 <i>Live incoming OTPs are delivered automatically.</i>"
                                 )
                                 self.send_text(reply, sender_chat)
             except Exception:
@@ -437,7 +420,7 @@ class SMSParser:
         return messages
 
 # =====================================================================
-# Target SMS HTTP Session & Captcha Solver
+# Target SMS HTTP Session & Auto Captcha Engine
 # =====================================================================
 class TargetSession:
     def __init__(self, base_url: str, username: str, password: str):
@@ -453,7 +436,7 @@ class TargetSession:
         self.password = password
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         })
         self.is_logged_in = False
 
@@ -471,18 +454,16 @@ class TargetSession:
 
     def login(self) -> bool:
         try:
-            log(f"Connecting to login page: {self.login_url}...", "INFO")
             resp = self.session.get(self.login_url, timeout=12)
             if resp.status_code != 200:
-                log(f"Login page returned HTTP {resp.status_code}", "ERROR")
+                log(f"Login page returned HTTP {resp.status_code}", "WARNING")
                 return False
 
             captcha_ans = self.solve_captcha(resp.text)
             if captcha_ans is None:
-                log("Failed to parse math captcha from login page!", "ERROR")
+                log("Failed to parse math captcha from login page", "WARNING")
                 return False
 
-            log(f"Math captcha solved: {captcha_ans}. Submitting credentials for '{self.username}'...", "INFO")
             payload = {
                 "username": self.username,
                 "password": self.password,
@@ -492,116 +473,110 @@ class TargetSession:
 
             if "signin" not in post_resp.url and "login" not in post_resp.url:
                 self.is_logged_in = True
-                log("Login successful! Authenticated.", "SUCCESS")
+                log("Authenticated successfully with panel.", "SUCCESS")
                 return True
 
             test_resp = self.session.get(DASHBOARD_URL, allow_redirects=False, timeout=10)
             if test_resp.status_code == 200:
                 self.is_logged_in = True
-                log("Login verified successfully via dashboard check!", "SUCCESS")
+                log("Session active and verified.", "SUCCESS")
                 return True
 
-            log("Login failed: Invalid credentials or incorrect captcha.", "ERROR")
+            log("Authentication check failed. Will retry.", "WARNING")
             self.is_logged_in = False
             return False
 
         except Exception as e:
-            log(f"Login exception: {e}", "ERROR")
+            log(f"Login network issue: {e}", "WARNING")
             self.is_logged_in = False
             return False
 
     def fetch_dashboard(self) -> Optional[str]:
         try:
-            resp = self.session.get(DASHBOARD_URL, allow_redirects=True, timeout=15)
+            resp = self.session.get(DASHBOARD_URL, allow_redirects=True, timeout=12)
             if "login" in resp.url or "signin" in resp.text:
-                log("Session expired. Auto re-logging in...", "WARNING")
                 self.is_logged_in = False
                 if self.login():
-                    resp = self.session.get(DASHBOARD_URL, allow_redirects=True, timeout=15)
+                    resp = self.session.get(DASHBOARD_URL, allow_redirects=True, timeout=12)
                 else:
                     return None
 
             if resp.status_code == 200:
                 return resp.text
             return None
-        except Exception as e:
-            log(f"Error fetching dashboard: {e}", "ERROR")
+        except Exception:
+            self.is_logged_in = False
             return None
 
 # =====================================================================
-# Main Execution Loop
+# 24/7 Continuous Monitoring Main Loop (Never Exits)
 # =====================================================================
 def main():
     log("==================================================", "INFO")
-    log("⚡ TARGET SMS — REAL-TIME OTP BOT", "INFO")
+    log("⚡ TARGET SMS — 24/7 NON-STOP MONITORING BOT", "INFO")
     log("==================================================", "INFO")
 
     if not USERNAME or not PASSWORD:
-        log("ERROR: Both USERNAME and PASSWORD are required in config.json or environment variables!", "ERROR")
-        sys.exit(1)
+        log("ERROR: Both USERNAME and PASSWORD are required!", "ERROR")
+        time.sleep(10)
+        return
 
     tg = TelegramBot(TG_TOKEN, TG_CHAT, ADMIN_ID)
     if tg.is_configured():
         tg.register_command_menu()
         tg.start_command_listener()
-        log(f"Telegram alert system active (Destination: {TG_CHAT}).", "INFO")
-    else:
-        log("Telegram alerts disabled (TG_TOKEN or TG_CHAT empty).", "WARNING")
+        log(f"Telegram alert channel: {TG_CHAT}", "INFO")
 
     session = TargetSession(PANEL_URL, USERNAME, PASSWORD)
-    if not session.login():
-        log("Initial login attempt failed. Will retry in main loop...", "WARNING")
-
     known_ids = set()
     is_first_sync = True
-    log(f"Bot active! Polling {DASHBOARD_URL} every {POLL_INTERVAL}s...", "SUCCESS")
+    consecutive_errors = 0
+
+    log(f"Live monitoring loop started. Polling every {POLL_INTERVAL}s...", "SUCCESS")
 
     while True:
         try:
             if not session.is_logged_in:
                 if not session.login():
-                    time.sleep(POLL_INTERVAL)
+                    consecutive_errors += 1
+                    sleep_time = min(15, 3 * consecutive_errors)
+                    time.sleep(sleep_time)
                     continue
 
+            consecutive_errors = 0
             html = session.fetch_dashboard()
 
             if html:
                 total_sms_on_web = SMSParser.extract_total_sms(html)
                 messages = SMSParser.parse_html(html)
-                
-                if total_sms_on_web == 0:
-                    total_sms_on_web = len(messages)
 
                 if is_first_sync:
                     for msg in messages:
                         known_ids.add(msg.id)
-                    log(f"Synced baseline ({total_sms_on_web} messages on web). Listening for LIVE OTPs...", "SUCCESS")
+                    log(f"Baseline established ({len(messages)} records on web). Monitoring for LIVE incoming OTPs...", "SUCCESS")
                     is_first_sync = False
                 else:
-                    new_count = 0
                     for msg in messages:
                         if msg.id not in known_ids:
                             known_ids.add(msg.id)
-                            new_count += 1
-                            
                             dollar_str = " | 💵 $" if msg.has_dollar else ""
                             log(f"🔔 LIVE OTP! [{msg.service}] Code: {msg.otp_code} | Phone: {msg.phone_number} | Country: {msg.carrier_range}{dollar_str}", "SUCCESS")
-                            log(f"   Message: {msg.full_text}", "INFO")
-
                             if tg.is_configured():
                                 tg.send_otp_alert(msg)
-
-                    if new_count > 0:
-                        log(f"Total on website: {total_sms_on_web} | New captured: {new_count}", "INFO")
 
             time.sleep(POLL_INTERVAL)
 
         except KeyboardInterrupt:
-            log("Bot stopped by user.", "INFO")
+            log("Bot shutdown requested by user.", "INFO")
             break
         except Exception as e:
-            log(f"Loop error: {e}", "ERROR")
+            log(f"Unexpected loop exception (Auto-recovering): {e}", "WARNING")
             time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except Exception as fatal:
+            log(f"Fatal exception in outer runner (Restarting in 5s): {fatal}", "ERROR")
+            time.sleep(5)

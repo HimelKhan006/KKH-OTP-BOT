@@ -33,9 +33,14 @@ TG_TOKEN = os.getenv("TG_TOKEN", LOCAL_CFG.get("telegram_bot_token", "8999866920
 TG_CHAT = os.getenv("TG_CHAT", LOCAL_CFG.get("telegram_chat_id", "6798979733")).strip()
 ADMIN_ID = os.getenv("ADMIN_ID", LOCAL_CFG.get("admin_id", "6798979733")).strip()
 
-# Auto-Delete Delays (in seconds)
-ONLINE_MSG_DELETE_SEC = 360  # 6 minutes
-OTP_MSG_DELETE_SEC = 600     # 10 minutes
+# GitHub Gist Database Configuration
+GIST_TOKEN = os.getenv("GIST_TOKEN", os.getenv("GH_TOKEN", os.getenv("GITHUB_TOKEN", LOCAL_CFG.get("gist_token", "")))).strip()
+GIST_ID = os.getenv("GIST_ID", LOCAL_CFG.get("gist_id", "")).strip()
+
+# Auto-Delete Delays
+ONLINE_MSG_DELETE_SEC = 360     # 6 minutes
+OTP_MSG_DELETE_SEC = 600        # 10 minutes
+DB_MAX_AGE_SECONDS = 86400      # 24 hours auto-purge
 
 # =====================================================================
 # Safe Logging Utility
@@ -63,6 +68,115 @@ class SMSMessage:
     has_dollar: bool = False
 
 # =====================================================================
+# GitHub Gist 24-Hour Database Engine (Zero Duplicates Across Restarts)
+# =====================================================================
+class GistDatabase:
+    """Persistent cloud storage with automatic 24-hour message purging."""
+    FILE_NAME = "kkh_otp_history.json"
+
+    def __init__(self, token: str = "", gist_id: str = ""):
+        self.token = token
+        self.gist_id = gist_id
+        self.local_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otp_history.json")
+        self.data: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self.load()
+
+    def purge_expired(self):
+        """Purges any OTP records older than 24 hours (86,400s)."""
+        now = time.time()
+        with self._lock:
+            fresh = {}
+            for msg_id, val in self.data.items():
+                rec_at = val.get("received_at", 0) if isinstance(val, dict) else val
+                if (now - rec_at) < DB_MAX_AGE_SECONDS:
+                    fresh[msg_id] = val
+            self.data = fresh
+
+    def load(self):
+        """Loads database from GitHub Gist or local cache."""
+        loaded = False
+        if self.token and self.gist_id:
+            try:
+                url = f"https://api.github.com/gists/{self.gist_id}"
+                headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json"}
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    files = r.json().get("files", {})
+                    if self.FILE_NAME in files:
+                        raw = files[self.FILE_NAME].get("content", "{}")
+                        self.data = json.loads(raw)
+                        loaded = True
+                        log(f"Synced {len(self.data)} OTP records from GitHub Gist database.", "SUCCESS")
+            except Exception as e:
+                log(f"Gist load notice: {e}", "WARNING")
+
+        if not loaded and os.path.exists(self.local_file):
+            try:
+                with open(self.local_file, "r", encoding="utf-8") as f:
+                    self.data = json.load(f)
+            except Exception:
+                pass
+
+        self.purge_expired()
+
+    def save(self):
+        """Saves database to local file and syncs with GitHub Gist."""
+        self.purge_expired()
+        
+        # 1. Local save
+        try:
+            with open(self.local_file, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, indent=2)
+        except Exception:
+            pass
+
+        # 2. GitHub Gist save
+        if not self.token:
+            return
+
+        try:
+            headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json"}
+            payload = {
+                "description": "KKH Target SMS Live OTP Database",
+                "files": {
+                    self.FILE_NAME: {
+                        "content": json.dumps(self.data, indent=2)
+                    }
+                }
+            }
+
+            if self.gist_id:
+                url = f"https://api.github.com/gists/{self.gist_id}"
+                requests.patch(url, headers=headers, json=payload, timeout=10)
+            else:
+                url = "https://api.github.com/gists"
+                payload["public"] = False
+                r = requests.post(url, headers=headers, json=payload, timeout=10)
+                if r.status_code == 201:
+                    self.gist_id = r.json().get("id", "")
+                    log(f"Created new GitHub Gist database (ID: {self.gist_id})", "SUCCESS")
+        except Exception:
+            pass
+
+    def has_message(self, msg_id: str) -> bool:
+        self.purge_expired()
+        with self._lock:
+            return msg_id in self.data
+
+    def add_message(self, msg: SMSMessage):
+        self.purge_expired()
+        with self._lock:
+            self.data[msg.id] = {
+                "received_at": time.time(),
+                "service": msg.service,
+                "phone": msg.phone_number,
+                "otp": msg.otp_code,
+                "timestamp": msg.timestamp
+            }
+        self.save()
+
+# =====================================================================
 # Telegram Engine with Auto-Delete & Admin Lock
 # =====================================================================
 class TelegramBot:
@@ -85,7 +199,6 @@ class TelegramBot:
         t.start()
 
     def schedule_deletion(self, target_chat: str, message_id: int, delay_seconds: int):
-        """Schedules a message to be automatically deleted after delay_seconds."""
         if not message_id or delay_seconds <= 0:
             return
         delete_time = time.time() + delay_seconds
@@ -170,24 +283,6 @@ class TelegramBot:
             except Exception:
                 time.sleep(1)
         return None
-
-    def send_online_confirmation(self):
-        """Sends clean ONLINE confirmation (auto-deletes after 6 minutes in group)."""
-        msg = (
-            "⚡ <b>TARGET SMS PRO — ONLINE</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "🟢 <b>Status:</b> Bot is Online & Active\n"
-            "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
-            f"⏱️ <b>Speed:</b> Instant (every {POLL_INTERVAL}s)\n"
-            f"⏳ <b>Auto-Delete:</b> Messages clean up automatically\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "💬 <i>Ready to receive live incoming OTPs...</i>"
-        )
-        if self.chat_id:
-            # Auto-delete from group after 6 minutes (360s)
-            self.send_text(msg, self.chat_id, auto_delete_sec=ONLINE_MSG_DELETE_SEC)
-        if self.admin_id and str(self.admin_id) != str(self.chat_id):
-            self.send_text(msg, self.admin_id, auto_delete_sec=ONLINE_MSG_DELETE_SEC)
 
     def send_otp_alert(self, msg: SMSMessage) -> bool:
         """Sends live OTP alert (auto-deletes after 10 minutes)."""
@@ -276,7 +371,6 @@ class TelegramBot:
                         if text:
                             raw_cmd = text.split("@")[0].lower().strip()
                             if raw_cmd == "/start":
-                                # Verify Admin authorization
                                 if not self.is_admin(sender_id, sender_chat):
                                     continue
 
@@ -286,7 +380,8 @@ class TelegramBot:
                                     "🟢 <b>System Status:</b> Online & Monitoring 24/7\n"
                                     "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
                                     f"⏱️ <b>Refresh Speed:</b> Every {POLL_INTERVAL}s\n"
-                                    f"⏳ <b>Auto-Cleanup:</b> OTPs (10m) | Online Banner (6m)\n"
+                                    "🗄️ <b>Database:</b> 24-Hour Anti-Duplicate Memory\n"
+                                    "⏳ <b>Auto-Cleanup:</b> OTPs (10m)\n"
                                     "━━━━━━━━━━━━━━━━━━━━━\n"
                                     "💬 <i>Live incoming OTPs will be delivered automatically.</i>"
                                 )
@@ -600,6 +695,9 @@ def main():
         time.sleep(10)
         return
 
+    # Initialize GitHub Gist Database (24h Memory)
+    db = GistDatabase(GIST_TOKEN, GIST_ID)
+
     tg = TelegramBot(TG_TOKEN, TG_CHAT, ADMIN_ID)
     if tg.is_configured():
         tg.register_command_menu()
@@ -607,7 +705,6 @@ def main():
         log(f"Telegram alert channel: {TG_CHAT} (Admin: {ADMIN_ID})", "INFO")
 
     session = TargetSession(PANEL_URL, USERNAME, PASSWORD)
-    known_ids = set()
     is_first_sync = True
     consecutive_errors = 0
 
@@ -627,13 +724,14 @@ def main():
 
             if is_first_sync:
                 for msg in messages:
-                    known_ids.add(msg.id)
-                log(f"Baseline established ({len(messages)} live records synchronized from website).", "SUCCESS")
+                    if not db.has_message(msg.id):
+                        db.add_message(msg)
+                log(f"Baseline established ({len(messages)} live records synchronized into 24h database).", "SUCCESS")
                 is_first_sync = False
             else:
                 for msg in messages:
-                    if msg.id not in known_ids:
-                        known_ids.add(msg.id)
+                    if not db.has_message(msg.id):
+                        db.add_message(msg)
                         dollar_str = " | 💵 $" if msg.has_dollar else ""
                         log(f"🔔 LIVE OTP! [{msg.service}] Code: {msg.otp_code} | Phone: {msg.phone_number} | Country: {msg.carrier_range}{dollar_str}", "SUCCESS")
                         if tg.is_configured():

@@ -629,8 +629,6 @@ def main():
                 for msg in messages:
                     known_ids.add(msg.id)
                 log(f"Baseline established ({len(messages)} live records synchronized from website).", "SUCCESS")
-                if tg.is_configured():
-                    tg.send_online_confirmation()
                 is_first_sync = False
             else:
                 for msg in messages:

@@ -148,10 +148,7 @@ class TelegramBot:
         return success
 
     def send_online_confirmation(self):
-        """Sends clean ONLINE confirmation to the group once on startup."""
-        target = self.chat_id or self.admin_id
-        if not target:
-            return
+        """Sends clean ONLINE confirmation to both connected group and Admin private chat."""
         msg = (
             "⚡ <b>TARGET SMS PRO — ONLINE</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
@@ -160,7 +157,10 @@ class TelegramBot:
             "━━━━━━━━━━━━━━━━━━━━━\n"
             "💬 <i>Ready to receive live incoming OTPs...</i>"
         )
-        self.send_text(msg, target)
+        if self.chat_id:
+            self.send_text(msg, self.chat_id)
+        if self.admin_id and str(self.admin_id) != str(self.chat_id):
+            self.send_text(msg, self.admin_id)
 
     def flush_old_updates(self):
         """Discards all old messages so bot never re-answers historical commands."""

@@ -141,12 +141,64 @@ class GistDatabase:
     FILE_NAME = "kkh_otp_encrypted_vault.json"
 
     def __init__(self, token: str = "", gist_id: str = ""):
-        self.token = token
-        self.gist_id = gist_id
+        self.token = token.strip()
+        self.gist_id = gist_id.strip()
         self.local_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otp_history.json")
         self.data: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self.init_gist_on_startup()
         self.load()
+
+    def init_gist_on_startup(self):
+        """Discovers existing gist or creates it immediately on startup so it appears in Your Gists."""
+        if not self.token:
+            return
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json"
+        }
+
+        try:
+            if not self.gist_id:
+                # 1. Search existing gists for our database file
+                r = requests.get("https://api.github.com/gists", headers=headers, params={"per_page": 50}, timeout=10)
+                if r.status_code == 200:
+                    gists = r.json()
+                    for g in gists:
+                        files = g.get("files", {})
+                        if self.FILE_NAME in files:
+                            self.gist_id = g.get("id", "")
+                            log(f"🗄️ Linked to existing Gist database: {self.gist_id}", "SUCCESS")
+                            return
+
+                # 2. If not found, immediately create it on GitHub
+                plain_json = json.dumps({})
+                encrypted_blob = SecureVault.encrypt(plain_json, VAULT_KEY)
+                wrapper = {
+                    "vault_version": "2.0_ENCRYPTED",
+                    "admin_shield": "PROTECTED",
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "total_records": 0,
+                    "encrypted_payload": encrypted_blob
+                }
+                payload = {
+                    "description": "🔒 KKH Target SMS — Encrypted OTP Database",
+                    "public": False,
+                    "files": {
+                        self.FILE_NAME: {
+                            "content": json.dumps(wrapper, indent=2)
+                        }
+                    }
+                }
+                r_create = requests.post("https://api.github.com/gists", headers=headers, json=payload, timeout=12)
+                if r_create.status_code == 201:
+                    self.gist_id = r_create.json().get("id", "")
+                    log(f"✨ Successfully created new Encrypted Gist database on GitHub (ID: {self.gist_id})", "SUCCESS")
+                else:
+                    log(f"Gist auto-create response: HTTP {r_create.status_code} - {r_create.text[:200]}", "WARNING")
+        except Exception as e:
+            log(f"Gist startup discovery notice: {e}", "WARNING")
 
     def purge_expired(self):
         """Purges any OTP records older than 24 hours (86,400s)."""

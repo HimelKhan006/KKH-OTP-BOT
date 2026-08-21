@@ -147,6 +147,21 @@ class TelegramBot:
             log(f"✅ OTP Forwarded: [{msg.service}] {msg.otp_code} -> Phone: {msg.phone_number}", "SUCCESS")
         return success
 
+    def send_online_confirmation(self):
+        """Sends clean ONLINE confirmation to the group once on startup."""
+        target = self.chat_id or self.admin_id
+        if not target:
+            return
+        msg = (
+            "⚡ <b>TARGET SMS PRO — ONLINE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "🟢 <b>Status:</b> Bot is Online & Active\n"
+            "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "💬 <i>Ready to receive live incoming OTPs...</i>"
+        )
+        self.send_text(msg, target)
+
     def flush_old_updates(self):
         """Discards all old messages so bot never re-answers historical commands."""
         if not self.token:
@@ -569,6 +584,8 @@ def main():
                     for msg in messages:
                         known_ids.add(msg.id)
                     log(f"Baseline established ({len(messages)} records on web). Monitoring for LIVE incoming OTPs...", "SUCCESS")
+                    if tg.is_configured():
+                        tg.send_online_confirmation()
                     is_first_sync = False
                 else:
                     for msg in messages:

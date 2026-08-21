@@ -173,9 +173,24 @@ class TelegramBot:
             return True
         return str(sender_id).strip() in allowed or str(chat_id).strip() in allowed
 
+    def init_update_offset(self):
+        """Flushes and discards old historical Telegram messages so they are never re-processed on restart."""
+        if not self.token:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{self.token}/getUpdates"
+            r = requests.get(url, params={"offset": -1}, timeout=10)
+            if r.status_code == 200:
+                results = r.json().get("result", [])
+                if results:
+                    self.last_update_id = results[-1]["update_id"]
+        except Exception:
+            pass
+
     def start_command_listener(self):
         if self._listener_running or not self.token:
             return
+        self.init_update_offset()
         self._listener_running = True
         t = threading.Thread(target=self._command_loop, daemon=True)
         t.start()
@@ -194,12 +209,15 @@ class TelegramBot:
                         text = msg.get("text", "").strip()
                         sender_id = str(msg.get("from", {}).get("id", ""))
                         sender_chat = str(msg.get("chat", {}).get("id", ""))
+                        chat_type = msg.get("chat", {}).get("type", "")
                         
                         if text:
                             raw_cmd = text.split("@")[0].lower().strip()
                             if raw_cmd == "/start":
                                 if not self.is_admin(sender_id, sender_chat):
-                                    self.send_text("⛔ <b>Access Denied</b>\n━━━━━━━━━━━━━━━━━━━━━\nOnly the authorized Admin can control this bot.", sender_chat)
+                                    # Stay silent in groups, only deny in private chat
+                                    if chat_type == "private":
+                                        self.send_text("⛔ <b>Access Denied</b>\n━━━━━━━━━━━━━━━━━━━━━\nOnly the authorized Admin can control this bot.", sender_chat)
                                     continue
 
                                 reply = (
@@ -209,7 +227,7 @@ class TelegramBot:
                                     "🔄 <b>Mode:</b> Real-time Live OTP Forwarder\n"
                                     f"⏱️ <b>Refresh Speed:</b> Every {POLL_INTERVAL}s\n"
                                     "━━━━━━━━━━━━━━━━━━━━━\n"
-                                    "💬 <i>Live incoming OTPs are delivered automatically.</i>"
+                                    "💬 <i>Live incoming OTPs will be delivered automatically.</i>"
                                 )
                                 self.send_text(reply, sender_chat)
             except Exception:
